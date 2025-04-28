@@ -69,7 +69,7 @@ export class PublicRoom extends Room {
     this.removePlayer(player)
     this.removeReadyPlayer(player.model._id.toString())
     player.room = null
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id}})
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id, location: "gb.publicRoom"}})
     this.clearScore(player.model._id.toString())
 
     return true
@@ -106,7 +106,7 @@ export class PublicRoom extends Room {
 
     if (findPlayer) {
       findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
-      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold}})
+      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold, redPocket: findPlayer.model.redPocket}})
     }
   }
 
@@ -216,7 +216,7 @@ export class PublicRoom extends Room {
         await service.playerService.logGoldConsume(p._id, ConsumeLogType.payGameFee, -conf.roomRate,
           p.model.gold, `扣除房费`);
         // 通知客户端更新金豆
-        this.updateResource2Client(p)
+        await this.updateResource2Client(p)
       }
     }
   }

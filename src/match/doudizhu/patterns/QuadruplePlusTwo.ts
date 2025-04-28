@@ -6,21 +6,29 @@ import {
 // 4带2
 export default class QuadruplePlusTwo implements IMatcher {
   name: string = PatterNames.quadPlus2;
-  verify(cards: Card[]): IPattern | null {
+  verify(cards: Card[], allCards: Card[] = []): IPattern | null {
+    // 四带2单张
     if (cards.length !== 6) {
-      return null
+      return null;
     }
+
     const groups = groupBy(cards, c => c.point)
     const quads = groups.filter(g => g.length === 4)
     if (quads.length === 1) {
-      const quad = quads[0]
-      const reset = arraySubtract(cards, quad)
-      return {
-        name: this.name,
-        score: quads[0][0].point,
-        cards: [...quad, ...reset]
+      const quad = quads[0];
+      const remainingCards = arraySubtract(cards, quad);
+
+      // 检查剩余牌是否可以组成两对或四张单牌
+      if (remainingCards.length === 2) {
+        // 如果剩余2张，检查是否为一对
+        return {
+          name: this.name,
+          score: quad[0].point,
+          cards: [...quad, ...remainingCards]
+        };
       }
     }
+
     return null;
   }
 
@@ -44,5 +52,4 @@ export default class QuadruplePlusTwo implements IMatcher {
         return this.verify(grp).score > target.score
       })
   }
-
 }

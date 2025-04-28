@@ -220,6 +220,9 @@ class PlayerState implements Serializable {
   // 番数
   fanShu: number = 0;
 
+  // 结算水数
+  gameOverShuiShu: number = 0;
+
   // 上一局番数
   lastFanShu: number = 0;
 
@@ -243,29 +246,38 @@ class PlayerState implements Serializable {
 
   huTurnList: any[] = [];
 
+  // 是否机器人
+  isRobot: boolean = false;
+
+  // 新手摸到的散牌
+  disperseCards: any[] = [];
+
+  // 是否第一次升级场次
+  isUpgrade: boolean = false;
+
   constructor(userSocket, room, rule) {
-    this.room = room
-    this.zhuang = false
-    this.rule = rule
-    this.ip = userSocket && userSocket.getIpAddress()
-    this.model = userSocket.model
-    this.emitter = new EventEmitter()
-    this.cards = new SourceCardMap(Enums.finalCard).fill(0)
+    this.room = room;
+    this.zhuang = false;
+    this.rule = rule;
+    this.ip = userSocket && userSocket.getIpAddress();
+    this.model = userSocket.model;
+    this.emitter = new EventEmitter();
+    this.cards = new SourceCardMap(Enums.finalCard).fill(0);
     this.disconnectCallBack = player => {
       if (player === this.msgDispatcher) {
-        this.onDisconnect()
+        this.onDisconnect();
       }
     }
-    this._id = this.model._id.toString()
-    this.listenDispatcher(userSocket)
-    this.msgDispatcher = userSocket
-    this.events = {}
-    this.dropped = []
-    this.lastDa = false
+    this._id = this.model._id.toString();
+    this.listenDispatcher(userSocket);
+    this.msgDispatcher = userSocket;
+    this.events = {};
+    this.dropped = [];
+    this.lastDa = false;
     // 不激活旧的机器人托管
-    this.onDeposit = false
-    this.ai = userSocket.isRobot() ? basicAi : playerAi
-
+    this.onDeposit = false;
+    this.ai = userSocket.isRobot() ? basicAi : playerAi;
+    this.isRobot = !!userSocket.isRobot();
     this.timeoutTask = null
     this.msgHook = {}
     this.takeCardStash = {}
@@ -281,10 +293,12 @@ class PlayerState implements Serializable {
     this.chiCombol = [];
     this.shuiShu = 0;
     this.panShu = 0;
+    this.gameOverShuiShu = 0;
     this.panInfo = {};
     this.score = room.getScore(userSocket)
     this.fanShu = room.getFanShu(userSocket)
     this.isYouJin = false;
+    this.isUpgrade = false;
   }
 
   get youJinTimes() {
@@ -645,6 +659,15 @@ class PlayerState implements Serializable {
     return result;
   }
 
+  checknoviceProtectionHuState() {
+    this.cards.lastTakeCard = this.lastCardToken
+    this.turn = this.cards.turn = this.room.gameState.turn
+    this.cards.takeSelfCard = true
+    this.cards.qiaoXiang = this.hadQiaoXiang
+    this.cards.first = this.turn === 2
+    return HuPaiDetect.check(this.cards, this.events, this.rule, this.seatIndex);
+  }
+
   getCardCount() {
     let count = 0;
 
@@ -661,8 +684,31 @@ class PlayerState implements Serializable {
     this.recorder.recordUserEvent(this, 'buHua', cards.sort((a, b) => a - b), this.getCardsArray());
   }
 
-  // 添加花牌
-  onShuffle(remainCards, caiShen, juShu, cards, seatIndex, juIndex, needShuffle, flowerList, allFlowerList) {
+  // 抢金或者天胡重发
+  async checkQiangJinOrHu(cards, caishen, seatIndex) {
+    cards.forEach(x => {
+      if (!this.room.gameState.isFlower(x)) {
+        this.cards[x]++;
+      }
+    });
+    this.caiShen = caishen
+    this.cards['caiShen'] = caishen
+    this.seatIndex = seatIndex
+
+    // 判断用户是否听牌
+    const tingPai = this.isTing();
+
+    cards.forEach(x => {
+      if (!this.room.gameState.isFlower(x)) {
+        this.cards[x]--;
+      }
+    });
+
+    return tingPai;
+  }
+
+  // 洗牌
+  onShuffle(remainCards, caiShen, juShu, cards, seatIndex, juIndex, needShuffle, flowerList, allFlowerList, zhuangIndex) {
     cards.forEach(x => {
       if (!this.room.gameState.isFlower(x)) {
         this.cards[x]++;
@@ -673,8 +719,8 @@ class PlayerState implements Serializable {
     this.seatIndex = seatIndex
     this.recorder.recordUserEvent(this, 'shuffle', null, cards.sort((a, b) => a - b));
     this.sendMessage('game/Shuffle', {ok: true, data: {
-        juShu, cards, caiShen: [caiShen], remainCards, juIndex,
-        needShuffle: !!needShuffle, flowerList, allFlowerList
+        juShu, cards, caiShen: [caiShen], remainCards, juIndex, zhuangCounter: this.room.zhuangCounter,
+        needShuffle: !!needShuffle, flowerList, allFlowerList, zhuang: zhuangIndex
       }})
   }
 
@@ -833,10 +879,10 @@ class PlayerState implements Serializable {
   }
 
   isTing() {
-    const caiShen = this.caiShen
+    const caiShen = this.caiShen;
 
     this.cards.caiShen = caiShen;
-    this.cards[caiShen]++
+    this.cards[caiShen]++;
     this.cards.turn = this.room.gameState.turn;
     const checkResult = HuPaiDetect.check(this.cards, this.events, this.rule, this.seatIndex);
     this.cards[caiShen]--;
@@ -911,7 +957,6 @@ class PlayerState implements Serializable {
         let recordCount = 0;
 
         // 如果是游金，记录游金
-
         if (qiangJin) {
           if (checkResult.hu && checkResult.huType === Enums.qiShouSanCai) {
             this.recordGameEvent(Enums.sanJinDao, card);
@@ -1209,28 +1254,16 @@ class PlayerState implements Serializable {
       const cards = genCardArray(this.cards)
       this.cancelTimeout()
       this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}})
+
+      const daPlayer = this.room.gameState.stateData[Enums.da];
+      if (daPlayer && daPlayer._id.toString() === this._id.toString()) {
+        this.emitter.emit('waitForDa', this.room.gameState.stateData.msg);
+      }
     })
     playerSocket.on('game/refreshQuiet', () => {
       this.emitter.emit('refreshQuiet', playerSocket, this.seatIndex)
     })
   }
-
-  // checkQiaoXiang() {
-  //   const caiCount = this.cards[this.caiShen]
-  //   if (caiCount) {
-  //     if (HuPaiDetect.checkQiaoXiang(this.cards)) {
-  //       return true
-  //     }
-  //   }
-  //   return false
-  // }
-
-  // mayCaiShenTou(card) {
-  //   this.cards[card]++
-  //   const pass = HuPaiDetect.mayCaiShenTou(this.cards)
-  //   this.cards[card]--
-  //   return pass
-  // }
 
   setQiaoXiang() {
     this.hadQiaoXiang = true
@@ -1373,7 +1406,8 @@ class PlayerState implements Serializable {
       fanShu: this.lastFanShu,
       model: this.model,
       isBroke: false,
-      panInfo: this.panInfo
+      panInfo: this.panInfo,
+      shuiFen: this.gameOverShuiShu
     }
   }
 

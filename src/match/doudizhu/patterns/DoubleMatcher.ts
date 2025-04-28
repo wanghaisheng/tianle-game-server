@@ -6,7 +6,7 @@ import {
 export default class DoubleMatcher implements IMatcher {
   name: string = PatterNames.double;
   // 出对子
-  verify(cards: Card[]): IPattern | null {
+  verify(cards: Card[], allCards: Card[] = []): IPattern | null {
     if (cards.length === 2 && cards[0].point === cards[1].point) {
       return {
         name: this.name,
@@ -22,7 +22,7 @@ export default class DoubleMatcher implements IMatcher {
       return [];
     }
     return groupBy(cards.filter(c => c.point > target.score), card => card.point)
-      .filter(g => g.length >= 2)
+      .filter(g => g.length > 1 && g.length < 4)
       .sort(lengthFirstThenPointGroupComparator)
       .map(grp => {
         return [grp[0], grp[1]]

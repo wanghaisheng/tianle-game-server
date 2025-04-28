@@ -1,18 +1,15 @@
 /**
  * Created by user on 2016-07-04.
  */
-import {GameType, TianleErrorCode} from "@fm/common/constants";
+import {ConsumeLogType, GameType, RobotStep, shopPropType, TianleErrorCode} from "@fm/common/constants";
 import {Channel} from 'amqplib'
 import * as lodash from 'lodash'
 // @ts-ignore
 import {pick} from 'lodash'
 import * as mongoose from 'mongoose'
 import * as logger from 'winston'
-import Club from '../../database/models/club'
-import ConsumeRecord from '../../database/models/consumeRecord'
 import DissolveRecord from '../../database/models/dissolveRecord'
 import GameRecord from '../../database/models/gameRecord'
-import PlayerModel from '../../database/models/player'
 import RoomRecord from '../../database/models/roomRecord'
 import PlayerManager from '../../player/player-manager'
 import '../../utils/algorithm'
@@ -24,6 +21,12 @@ import {AuditManager} from "./auditManager";
 import Game from './game'
 import {RobotManager} from "./robotManager";
 import TableState, {stateGameOver} from "./table_state"
+import {service} from "../../service/importService";
+import Enums from "../xmmajiang/enums";
+import PlayerMedal from "../../database/models/PlayerMedal";
+import PlayerHeadBorder from "../../database/models/PlayerHeadBorder";
+import RoomFeeConfig from "../../database/models/roomFeeConfig";
+import PlayerProp from "../../database/models/PlayerProp";
 
 const ObjectId = mongoose.Types.ObjectId
 const gameType = GameType.xmmj;
@@ -145,6 +148,11 @@ class Room extends RoomBase {
   robotManager: RobotManager
   auditManager: AuditManager
 
+  @autoSerialize
+  isWaitRecharge: boolean = false;
+  @autoSerialize
+  waitRechargeLists: any[] = [];
+
   constructor(rule: any, roomNum: number) {
     super()
     this.game = new Game(rule)
@@ -158,6 +166,8 @@ class Room extends RoomBase {
       const disconnectPlayer = this.getPlayerById(messageBoyd.from)
       await this.playerDisconnect(disconnectPlayer)
     }
+
+    // this.init();
 
     this.readyPlayers = []
     this.gameState = null
@@ -178,6 +188,8 @@ class Room extends RoomBase {
 
     this.dissolveReqInfo = []
     this.autoDissolve();
+
+    this.isWaitRecharge = false;
   }
 
   get base() {
@@ -196,31 +208,60 @@ class Room extends RoomBase {
     return 0
   }
 
-  static roomFee(rule): number {
-    if (rule.juShu === 4) {
-      return 1
-    } else if (rule.juShu === 8) {
-      return 2
-    } else {
-      return 3
+  static getJuType(rule) {
+    if (rule.gameJuCount === Enums.yiKe) {
+      return 1;
     }
+
+    if (rule.gameJuCount === Enums.liangQuan) {
+      return 2;
+    }
+
+    return 3;
+  }
+
+  static async roomFee(rule): Promise<number> {
+    const configList = await RoomFeeConfig.find({game: GameType.pcmj}).sort({diamond: 1});
+    const configIndex = configList.findIndex(c => c.juShu === rule.juShu && c.juType === this.getJuType(rule));
+
+    if (rule.ruleId) {
+      if (configIndex !== -1) {
+        if (configList[configIndex].clubMode) {
+          return configList[configIndex].diamond;
+        }
+
+        return configList[configList.length - 1].diamond;
+      }
+
+      return configList[configList.length - 1].diamond;
+    }
+
+    if (configIndex !== -1) {
+      if (configList[configIndex].personMode) {
+        return configList[configIndex].diamond;
+      }
+
+      return 0;
+    }
+
+    return configList[configList.length - 1].diamond;
   }
 
   static async recover(json: any, repository: { channel: Channel, userCenter: any }): Promise<Room> {
-    const room = new Room(json.gameRule, json._id)
+    const room = new Room(json.gameRule, json._id);
     // 还原 uid
     room.uid = json.uid;
-    const gameAutoKeys = autoSerializePropertyKeys(room.game)
-    Object.assign(room.game, pick(json.game, gameAutoKeys))
+    const gameAutoKeys = autoSerializePropertyKeys(room.game);
+    Object.assign(room.game, pick(json.game, gameAutoKeys));
 
-    const keys = autoSerializePropertyKeys(room)
-    Object.assign(room, pick(json, keys))
+    const keys = autoSerializePropertyKeys(room);
+    Object.assign(room, pick(json, keys));
 
     for (const [index, playerId] of json.playersOrder.entries()) {
       if (playerId) {
         const playerRmq = await getPlayerRmqProxy(playerId, repository.channel, gameType);
         if (json.players[index]) {
-          room.players[index] = playerRmq
+          room.players[index] = playerRmq;
         }
         room.playersOrder[index] = playerRmq;
       }
@@ -238,6 +279,7 @@ class Room extends RoomBase {
       room.gameState = new TableState(room, room.rule, room.game.juShu)
       room.gameState.resume(json)
     }
+
     if (room.roomState === 'dissolve') {
       const delayTime = room.dissolveTime + 180 * 1000 - Date.now();
       room.dissolveTimeout = setTimeout(() => {
@@ -285,8 +327,8 @@ class Room extends RoomBase {
     return this.players.find(p => p && p._id === id)
   }
 
-  privateRoomFee(rule): number {
-    return Room.roomFee(rule)
+  async privateRoomFee(rule): Promise<number> {
+    return await Room.roomFee(rule);
   }
 
   recordPlayerEvent(evtType, playerId) {
@@ -320,6 +362,7 @@ class Room extends RoomBase {
 
   canJoin(player) {
     if (!player) {
+      console.warn("player is not exists");
       return false
     }
 
@@ -327,7 +370,7 @@ class Room extends RoomBase {
       return true
     }
 
-    return this.players.filter(x => x != null).length + this.disconnected.length < this.capacity
+    return true
   }
 
   mergeOrder() {
@@ -347,11 +390,11 @@ class Room extends RoomBase {
         this.arrangePos(player)
       }
 
-      this.players[indexForPlayer] = player
+      this.players[indexForPlayer] = player;
       return
     }
     for (let i = 0; i < this.players.length; i++) {
-      if (this.players[i] == null && this.playersOrder[i] == null) {
+      if (this.players[i] == null) {
         this.players[i] = player
         break
       }
@@ -360,7 +403,7 @@ class Room extends RoomBase {
 
   removePlayer(player) {
     for (let i = 0; i < this.players.length; i++) {
-      if (this.players[i] === player) {
+      if (this.players[i] && this.players[i]._id.toString() === player._id.toString()) {
         this.players[i] = null
         break
       }
@@ -442,8 +485,10 @@ class Room extends RoomBase {
     const positions = [];
     for (let i = 0; i < this.players.length; i++) {
       const p = this.players[i];
-      const position = i;
-      positions.push({_id: p._id, position});
+      if (p) {
+        const position = i;
+        positions.push({_id: p._id, shortId: p.model.shortId, position});
+      }
     }
 
     this.broadcast("game/updatePosition", {ok: true, data: {positions}});
@@ -520,8 +565,9 @@ class Room extends RoomBase {
   }
 
   async addScore(playerId: string, gains: number) {
-    const p = PlayerManager.getInstance().getPlayer(playerId)
-    this.scoreMap[playerId] += gains
+    const oldScore = this.scoreMap[playerId];
+    this.scoreMap[playerId] += gains;
+    console.warn("oldScore-%s, gains-%s, score-%s", oldScore, gains, this.scoreMap[playerId]);
   }
 
   removeDisconnected(item) {
@@ -574,11 +620,43 @@ class Room extends RoomBase {
   }
 
   async joinMessageFor(newJoinPlayer): Promise<any> {
+    let medalId = null;
+    let headerBorderId = null;
+    let emojiIds = [];
+    // 获取用户称号
+    const playerMedal = await PlayerMedal.findOne({playerId: newJoinPlayer._id, isUse: true});
+    if (playerMedal && (playerMedal.times === -1 || playerMedal.times > new Date().getTime())) {
+      medalId = playerMedal.propId;
+    }
+
+    // 获取用户头像框
+    const playerHeadBorder = await PlayerHeadBorder.findOne({playerId: newJoinPlayer._id, isUse: true});
+    if (playerHeadBorder && (playerHeadBorder.times === -1 || playerHeadBorder.times > new Date().getTime())) {
+      headerBorderId = playerHeadBorder.propId;
+    }
+
+    // 获取用户表情
+    const playerEmojis = await PlayerProp.find({playerId: newJoinPlayer._id, propType: shopPropType.emoji});
+    for (let i = 0; i < playerEmojis.length; i++) {
+      const playerEmoji = playerEmojis[i];
+      if (playerEmoji && (playerEmoji.times === -1 || playerEmoji.times > new Date().getTime())) {
+        emojiIds.push(playerEmoji.propId);
+      }
+    }
+
+    const newModel = {...newJoinPlayer.model, medalId, headerBorderId, emojiIds};
+    const index = this.players.findIndex(p => p && !p.isRobot());
     return {
       _id: this._id,
       index: this.indexOf(newJoinPlayer),
-      model: newJoinPlayer.model,
+      model: newModel,
       ip: newJoinPlayer.getIpAddress(),
+      startIndex: index,
+      medalId,
+      headerBorderId,
+      emojiIds,
+      isWaitRecharge: this.waitRechargeLists.includes(newJoinPlayer._id.toString()),
+      gameWaitRecharge: this.isWaitRecharge,
       isGameRunning: !!this.gameState && this.gameState.state !== stateGameOver,
       location: newJoinPlayer.location,
       owner: this.ownerId,
@@ -597,6 +675,14 @@ class Room extends RoomBase {
   }
 
   async announcePlayerJoin(newJoinPlayer) {
+    if (this.isPublic) {
+      // 记录用户正在对局中
+      const playerModel = await service.playerService.getPlayerModel(newJoinPlayer._id);
+      playerModel.isGame = true;
+      playerModel.gameTime = new Date();
+      await playerModel.save();
+    }
+
     this.broadcast('room/joinReply', {ok: true, data: await this.joinMessageFor(newJoinPlayer)})
     for (const alreadyInRoomPlayer of this.players
       .map((p, index) => {
@@ -675,7 +761,7 @@ class Room extends RoomBase {
   // }
 
   async nextGame(thePlayer) {
-    if (this.game.juShu <= 0) {
+    if (this.game.juShu <= 0 && !this.isPublic) {
       thePlayer.sendMessage('room/joinReply', {ok: false, info: TianleErrorCode.roomIsFinish})
       return false;
     }
@@ -687,8 +773,6 @@ class Room extends RoomBase {
 
     await this.announcePlayerJoin(thePlayer);
 
-    // 测试洗牌
-    // await this.addShuffle(thePlayer);
     return true;
   }
 
@@ -707,7 +791,7 @@ class Room extends RoomBase {
     roomCreator.sendMessage('room/dissolve', {ok: true, data: {}})
     roomCreator.room = null
     this.players.forEach(player => {
-      if (player && player !== roomCreator) {
+      if (player && player._id.toString() !== roomCreator._id.toString()) {
         player.sendMessage('room/dissolve', {ok: true, data: {}})
         player.room = null
       }
@@ -722,6 +806,10 @@ class Room extends RoomBase {
     await this.recordDrawGameScore()
     this.dissolveReqInfo = [];
     const allOverMessage = this.allOverMessage()
+    allOverMessage.location = "xmmj.room";
+
+    // @ts-ignore
+    await this.redisClient.hdelAsync("canJoinRooms", this._id);
 
     clearTimeout(this.dissolveTimeout)
     this.roomState = ''
@@ -770,14 +858,14 @@ class Room extends RoomBase {
 
     this.broadcast('room/playerDisconnect', {ok: true, data: {index: this.players.indexOf(player), gameState: !!this.gameState}}, player.msgDispatcher)
     // this.removePlayer(player)
-    this.disconnected.push([player._id, index])
+    // this.disconnected.push([player._id, index])
     this.emit('disconnect', p._id)
   }
 
   removeReadyPlayer(playerId: string) {
-    const index = this.readyPlayers.indexOf(playerId)
-    if (index >= 0) {
-      this.readyPlayers.splice(index, 1)
+    const index = this.readyPlayers.findIndex(_id => _id.toString() === playerId);
+    if (index !== -1) {
+      this.readyPlayers.splice(index, 1);
       return true
     }
     return false
@@ -822,7 +910,7 @@ class Room extends RoomBase {
     //     this.players[i] = null
     //   }
     // }
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: p._id, roomId: this._id}})
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: p._id, roomId: this._id, location: "xmmj.room"}})
     this.removeReadyPlayer(p._id.toString())
     this.clearScore(player._id.toString())
 
@@ -884,7 +972,7 @@ class Room extends RoomBase {
 
   onRequestDissolve(player) {
     if (Date.now() - this.dissolveTime < 60 * 1000) {
-      player.sendMessage('game/showInfo', {ok: false, info: TianleErrorCode.dissolveInsufficient})
+      player.sendMessage('room/dissolveReq', {ok: false, info: TianleErrorCode.dissolveInsufficient})
       return
     }
     const dissolveInfo = this.getDissolvePlayerInfo(player);
@@ -1038,23 +1126,53 @@ class Room extends RoomBase {
 
     this.sortPlayer(nextZhuang)
     this.clearReady()
+    await this.charge();
+
     // 下一局
     await this.robotManager.nextRound();
 
     // 更新玩家位置
-    if (!this.isPublic) {
-      await this.updatePosition();
+    await this.updatePosition();
+
+    const updateNoRubyFunc = async() => {
+      if (this.isPublic) {
+        // 判断机器人是否需要补充金豆
+        await this.updateNoRuby();
+      }
+
+      this.gameState.dissolve();
+      this.gameState = null;
+      this.readyPlayers = [];
+      this.robotManager.model.step = RobotStep.waitRuby;
+
+      if (this.isRoomAllOver(states) && !this.isPublic) {
+        const message = this.allOverMessage();
+        this.broadcast('room/allOver', {ok: true, data: message});
+        this.players.forEach(x => x && this.leave(x, true));
+        this.emit('empty', this.disconnected);
+      }
+
     }
 
-    this.gameState.dissolve();
-    this.gameState = null;
+    setTimeout(updateNoRubyFunc, 1200);
+  }
 
-    if (this.isRoomAllOver(states) && !this.isPublic) {
-      const message = this.allOverMessage();
-      this.broadcast('room/allOver', {ok: true, data: message});
-      this.players.forEach(x => x && this.leave(x, true));
-      this.emit('empty', this.disconnected);
+  async updateNoRuby() {
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (!p || !p.isRobot()) {
+        continue;
+      }
+
+      const resp = await service.gameConfig.rubyRequired(p._id.toString(), this.gameRule);
+      if (resp.isNeedRuby || resp.isUpgrade) {
+        this.isWaitRecharge = true;
+        this.waitRechargeLists.push(p._id.toString());
+        this.broadcast('resource/robotIsNoRuby', {ok: true, data: {index: i, isUpgrade: resp.isUpgrade, isNeedRuby: resp.isNeedRuby, conf: resp.conf}})
+      }
     }
+
+    return true;
   }
 
   allOverMessage(): any {
@@ -1092,34 +1210,6 @@ class Room extends RoomBase {
     return message;
   }
 
-  async chargeCreator() {
-    if (!this.charged) {
-      this.charged = true
-      const createRoomNeed = this.privateRoomFee(this.rule)
-      const creatorId = this.creator.model._id
-      const playerManager = PlayerManager.getInstance()
-
-      const payee = playerManager.getPlayer(creatorId) || this.creator
-
-      payee.model.gem -= createRoomNeed
-      payee.sendMessage('resource/createRoomUsedGem', {
-        createRoomNeed,
-      })
-
-      PlayerModel.update({_id: creatorId},
-        {
-          $inc: {
-            gem: -createRoomNeed,
-          },
-        }, err => {
-          if (err) {
-            logger.error(err)
-          }
-        })
-      new ConsumeRecord({player: creatorId, gem: createRoomNeed}).save()
-    }
-  }
-
   // @once
   // async refundClubOwner() {
   //   if (!this.clubMode) return
@@ -1149,25 +1239,6 @@ class Room extends RoomBase {
   //   }
   // }
 
-  async chargeClubOwner() {
-    const fee = Room.roomFee(this.rule)
-
-    PlayerModel.update({_id: this.clubOwner._id},
-      {
-        $inc: {
-          gem: -fee,
-        },
-      }, err => {
-        if (err) {
-          logger.error(this.clubOwner._id, err)
-        }
-      })
-
-    this.clubOwner.sendMessage('resource/createRoomUsedGem', {
-      createRoomNeed: fee
-    })
-  }
-
   sortPlayer(zhuang) {
     if (zhuang) {
       const playersCopy = new Array(this.players.length)
@@ -1191,262 +1262,7 @@ class Room extends RoomBase {
     this.auditManager = new AuditManager(this.gameRule, this.uid, this._id);
     await this.auditManager.init();
   }
-}
 
-// export class PublicRoom extends Room {
-//   checkRoomInterval: NodeJS.Timeout = null;
-//
-//   constructor(rule) {
-//     super(rule)
-//     this.isPublic = true
-//     // this.charge = this.chargePublicPlayers
-//
-//     if (rule.diFen < 1000) {
-//       this.checkRoomInterval = setInterval(() => {
-//         const needPlayers = this.players.filter(p => !p).length
-//         const hasHuman = this.players.some(p => {
-//           return p && !p.isRobot()
-//         })
-//         if (hasHuman && needPlayers > 0) {
-//
-//           redisClient.rpoplpush("profiles", "profiles", (err, profileString) => {
-//             if (err) return;
-//             try {
-//               const model = JSON.parse(profileString)
-//               const npc = new NpcPlayer(model)
-//               if (this.rule.diFen === 500) {
-//                 npc.model.ruby += 50000
-//               }
-//               // this.join(npc)
-//               // this.ready(npc)
-//             } catch (e) {
-//               console.error('error stack', e.stack);
-//             }
-//           })
-//         }
-//       }, ms('4s'))
-//     }
-//   }
-//
-//   allOverMessage(): any {
-//     return {}
-//   }
-//
-//   isRoomAllOver(): boolean {
-//     return false
-//   }
-//
-//   private cost(): number {
-//     return Math.round((this.rule.diFen || 50) / 2)
-//   }
-//
-//   async chargePublicPlayers() {
-//     const cost = this.cost()
-//     const playerManager = PlayerManager.getInstance()
-//
-//     for (const player of this.snapshot) {
-//       const payee = playerManager.getPlayer(player.model._id) || player
-//       payee.model.ruby -= cost
-//       payee.sendMessage('resource/createRoomUsedRuby', {
-//         createRoomNeed: cost
-//       })
-//       PlayerModel.update({_id: player.model._id},
-//         {
-//           $inc: {
-//             ruby: -cost,
-//           },
-//         }, err => {
-//           if (err) {
-//             logger.error(player.model, err)
-//           }
-//         })
-//
-//       new ConsumeRecord({player: player.model._id, cost: cost / 10}).save()
-//     }
-//   }
-//
-//   initScore() {
-//     return;
-//   }
-//
-//   getScore(player) {
-//     if (player.model) {
-//       return player.model.gold || 0
-//     }
-//     return 0
-//   }
-//
-//   // recordGameRecord() {
-//   //   return
-//   // }
-//
-//   // async recordRoomScore() {
-//   //   return {}
-//   // }
-//
-//   async addScore(playerId, v) {
-//
-//     const robot = this.players.find(player => {
-//       return player && player.isRobot() && player.model._id === playerId
-//     })
-//
-//     if (robot) {
-//       robot.model.ruby += v
-//       return
-//     }
-//
-//     const playerManager = PlayerManager.getInstance()
-//     playerManager.addRuby(playerId, v)
-//
-//     return
-//   }
-//
-//   async nextGame(thePlayer) {
-//
-//     if (thePlayer.ruby <= Room.publicRoomLowestLimit(this.rule)) {
-//       thePlayer.sendMessage('room/join-fail', {reason: `钻石不足, 无法继续游戏`})
-//       return false
-//     }
-//
-//     if (this.indexOf(thePlayer) < 0) {
-//       thePlayer.sendMessage('room/join-fail', {reason: '您已经不属于这个房间.'})
-//       return false
-//     }
-//
-//     await this.announcePlayerJoin(thePlayer)
-//
-//     this.cancelWaitNextGame(thePlayer)
-//
-//     return true
-//   }
-//
-//   async gameOver(nextZhuangId, states) {
-//     this.clearPlayersIfPublic()
-//     return super.gameOver(nextZhuangId, states)
-//   }
-//
-//   playerDisconnect(player) {
-//     if (super.playerDisconnect(player)) {
-//       if (!this.gameState) {
-//         this.leave(player)
-//         return true
-//       }
-//       return true
-//     }
-//     return false
-//   }
-//
-//   leave(player) {
-//     if (super.leave(player)) {
-//       if (this.isEmpty()) {
-//         this.emit('empty', this.disconnected)
-//         clearInterval(this.checkRoomInterval)
-//         this.readyPlayers = []
-//       }
-//       return true
-//
-//     } else {
-//       return false
-//     }
-//   }
-//
-//   cancelWaitNextGame(player) {
-//     remove(this.waitNextGamePlayers, waitPlayer => waitPlayer === player)
-//   }
-//
-//   waitNextGame(player) {
-//     this.waitNextGamePlayers.push(player)
-//   }
-//
-//   private WAIT_NEXT_GAME_TIMEOUT = 30 * 1000
-//
-//   countDownEvictWaiter() {
-//     setTimeout(() => {
-//       this.waitNextGamePlayers.forEach(player => this.leave(player))
-//     }, this.WAIT_NEXT_GAME_TIMEOUT)
-//   }
-//
-//   private evictWaiterTimeout() {
-//     this.inRoomPlayers.forEach(player => this.waitNextGame(player))
-//     this.countDownEvictWaiter()
-//   }
-//
-//   clearPlayersIfPublic() {
-//     this.evictWaiterTimeout()
-//     this.clearPlayersOrderBaseOnDisconnected()
-//     this.clearDisconnected()
-//   }
-//
-//   clearPlayersOrderBaseOnDisconnected() {
-//     this.disconnected.forEach(([_, index]) => this.playersOrder[index] = null)
-//   }
-//
-//   // 赢家付
-//   async chargeWinner() {
-//     if (this.charged) return
-//     this.charged = true
-//     const payList = [];
-//     for (let j = 0; j < this.players.length; j ++) {
-//       // @ts-ignore
-//       const p = this.gameState && this.gameState.players[j];
-//       if (p) {
-//         if (p.huPai()) {
-//           payList.push(this.players[j]);
-//         }
-//       }
-//     }
-//     if (payList.length < 1) {
-//       return;
-//     }
-//     let fee = this.privateRoomFee(this.rule)
-//     fee = Math.ceil(fee / payList.length) || 1;
-//     for (const p of payList) {
-//       PlayerModel.update({_id: p.model._id},
-//         {
-//           $inc: {
-//             gem: -fee,
-//           },
-//         }, err => {
-//           if (err) {
-//             logger.error(p.model._id, err)
-//           }
-//         })
-//
-//       p.sendMessage('resource/createRoomUsedGem', {
-//         createRoomNeed: fee
-//       })
-//     }
-//   }
-//
-//   async updateBigWinner() {
-//     const record = await RoomRecord.findOne({ room: this.uid });
-//     if (!record) {
-//       // 出错了
-//       console.error('no room record to update winner', this.uid)
-//       return;
-//     }
-//     let winner = [];
-//     let tempScore = 0;
-//     for (let j = 0; j < this.snapshot.length; j ++) {
-//       const p = this.snapshot[j]
-//       if (p) {
-//         const score = this.playerGainRecord[p.model._id] || 0;
-//         if (tempScore === score) {
-//           winner.push(p.model.shortId)
-//         }
-//         if (tempScore < score) {
-//           tempScore = score;
-//           winner = [p.model.shortId]
-//         }
-//       }
-//     }
-//     record.bigWinner = winner;
-//     await record.save();
-//   }
-//   async init() {
-//     // 初始化以后，再开启机器人
-//     this.robotManager = new RobotManager(this, this.gameRule.depositCount);
-//   }
-// }
+}
 
 export default Room

@@ -54,7 +54,7 @@ export class RobotManager extends NewRobotManager {
       const isHu = proxy.playerState.checkZiMo();
 
       if (this.room.gameState.testMoCards.length === 0) {
-        if (this.room.gameState.state === 10) {
+        if (this.room.gameState.state === 10)  {
           await proxy.choice(Enums.qiangJin);
           continue;
         } else if (isHu.hu && !this.room.gameState.stateData.type) {
@@ -63,7 +63,7 @@ export class RobotManager extends NewRobotManager {
         } else if (AnGangIndex) {
           await proxy.gang(Enums.anGang, AnGangIndex);
           continue;
-        } else if (buGangIndex) {
+        } else if (buGangIndex && !this.room.gameState.stateData.type) {
           await proxy.gang(Enums.buGang, buGangIndex);
           continue;
         } else if (choice) {
@@ -132,7 +132,7 @@ export class RobotManager extends NewRobotManager {
 
   // 是否碰吃杠胡
   isPlayerChoice(playerId) {
-    const actionList = [Enums.hu, Enums.peng, Enums.chi, Enums.gang];
+    const actionList = [Enums.hu, Enums.chi, Enums.gang, Enums.peng];
 
     for (const action of actionList) {
       if ([Enums.peng, Enums.chi, Enums.gang].includes(action) && this.room.gameState.stateData[action] && playerId.toString() === this.room.gameState.stateData[action]._id.toString()) {

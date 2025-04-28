@@ -71,7 +71,7 @@ export class PublicRoom extends Room {
     this.removeOrder(player);
     this.removeReadyPlayer(player.model._id)
     player.room = null
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id}})
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id, location: "pcmj.publicRoom"}})
     this.clearScore(player.model._id)
 
     return true
@@ -103,7 +103,7 @@ export class PublicRoom extends Room {
       return;
     }
     findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
-    findPlayer.sendMessage('resource/update', {ok: true, data: pick(findPlayer.model, ['gold', 'diamond', 'tlGold'])})
+    findPlayer.sendMessage('resource/update', {ok: true, data: pick(findPlayer.model, ['gold', 'diamond', 'tlGold', 'redPocket'])})
   }
 
   // 更新 player model

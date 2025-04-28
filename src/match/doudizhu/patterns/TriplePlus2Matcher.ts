@@ -7,16 +7,17 @@ import {
 // 3带2
 export default class TriplePlus2Matcher implements IMatcher {
   name: string = PatterNames.triplePlus2;
-  verify(cards: Card[]): IPattern | null {
-    if ([3, 4, 5].includes(cards.length)) {
+  verify(cards: Card[], allCards: Card[] = []): IPattern | null {
+    if (cards.length === 5) {
       const groups = groupBy(cards, (card: Card) => card.point).sort((grp1, grp2) => {
         return grp2.length - grp1.length
       })
-      // console.warn("groups-%s", JSON.stringify(groups));
-      if (groups[0].length >= 3) {
-        if (groups[0].length === 4 && groups[0][0].point === groups[0][3].point) {
+      // console.warn("triple++ groups-%s", JSON.stringify(groups));
+      if (groups[0].length === 3) {
+        if (groups.length > 2) {
           return null;
         }
+
         return {
           name: this.name,
           score: groups[0][0].point,
@@ -29,26 +30,30 @@ export default class TriplePlus2Matcher implements IMatcher {
   }
 
   promptWithPattern(target, cards: Card[]): Card[][] {
-    if (target.name !== this.name || cards.length < 3) {
-      return []
+    if (target.name !== this.name || cards.length < 5) {
+      return [];
     }
-    return groupBy(cards.filter(c => c.point > target.score), c => c.point)
-      .filter(grp => grp.length === 3)
-      .sort(lengthFirstThenPointGroupComparator)
-      .map(group => {
-        // console.warn("cards-%s, group-%s", JSON.stringify(cards), JSON.stringify(group));
-        const triple = group.slice(0, 3)
-        const leftCards = [].concat(...groupBy(arraySubtract(cards, triple), c => c.point).sort(lengthFirstThenPointGroupComparator));
-        let simpleCards = [];
-        if (leftCards.length === 1) {
-          simpleCards.push(leftCards[0]);
-        }
-        if (leftCards.length > 1) {
-          leftCards[0] === leftCards[1] ? simpleCards = [...simpleCards, ...leftCards] : simpleCards.push(leftCards[0]);
-        }
 
+    // 假设groupBy和arraySubtract函数已经定义并可以正确使用
+    const filteredCards = cards.filter(c => c.point > target.score);
+    const groupedByPoint = groupBy(filteredCards, c => c.point);
+    const triples = groupedByPoint.filter(grp => grp.length === 3).sort(lengthFirstThenPointGroupComparator);
 
-        return [...triple, ...simpleCards];
-      })
+    let results = [];
+    for (const group of triples) {
+      const triple = group.slice(0, 3);
+      const remainingCards = arraySubtract(cards, triple);
+      const leftGroupedByPoint = groupBy(remainingCards, c => c.point).filter(grp1 => grp1.length >= 2).sort(lengthFirstThenPointGroupComparator);
+      // console.warn("targetName-%s, name-%s, triple-%s, leftCards-%s", target.name, this.name, JSON.stringify(triple), JSON.stringify(leftGroupedByPoint));
+
+      if (leftGroupedByPoint.length === 0) {
+        // 如果没有足够的对子来匹配三个一组，则跳过当前的三张组合
+        continue; // 使用continue来跳过当前循环的剩余部分
+      }
+
+      results.push([...triple, ...leftGroupedByPoint[0].slice(0, 2)]);
+    }
+
+    return results;
   }
 }

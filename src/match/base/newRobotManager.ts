@@ -1,8 +1,11 @@
-import {RobotStep} from "@fm/common/constants";
+import {ConsumeLogType, GameType, RobotStep} from "@fm/common/constants";
 import * as config from '../../config'
 import {RobotMangerModel} from '../../database/models/robotManager';
 import {service} from "../../service/importService";
-import { RobotRmqProxy } from "./robotRmqProxy";
+import {RobotRmqProxy} from "./robotRmqProxy";
+import Enums from "../majiang/enums";
+// @ts-ignore
+import {pick} from "lodash";
 
 // 机器人出牌
 export class NewRobotManager {
@@ -18,6 +21,10 @@ export class NewRobotManager {
   watchTimer: any
   isWatching: boolean
   waitPublicRobot: number
+  waitPublicRobotSecond: number
+  waitKickOutTime: number
+  waitUpdateRubyTime: number
+  waitUpdateRandomTime: number
   isPlayed: boolean
   selectModeTimes: number
   constructor(room, depositCount) {
@@ -29,6 +36,10 @@ export class NewRobotManager {
     this.waitInterval = {};
     this.isWatching = false;
     this.waitPublicRobot = 0;
+    this.waitPublicRobotSecond = 0;
+    this.waitKickOutTime = 0;
+    this.waitUpdateRubyTime = 0;
+    this.waitUpdateRandomTime = 0;
     this.isPlayed = true;
     this.selectModeTimes = 0;
     this.startMonit();
@@ -51,6 +62,7 @@ export class NewRobotManager {
       this.model = await RobotMangerModel.create({
         roomId: this.room._id,
         depositCount: this.depositCount || 0,
+        gameType: this.room.gameRule.gameType,
         depositPlayer: {},
         offlineTimes: {},
         publicRoomRobot: [],
@@ -72,7 +84,6 @@ export class NewRobotManager {
 
   // 每秒开始监控
   startMonit() {
-    console.log('monit start ', this.room._id);
     this.watchTimer = setInterval(async () => {
       if (this.isWatching) {
         // 上次还没处理完
@@ -116,19 +127,48 @@ export class NewRobotManager {
     // 添加公共房机器人
     await this.addRobotForPublicRoom();
 
+    // console.warn("111 room %s step %s", this.room._id, this.model.step);
+
     // 查看金豆
-    if (this.model.step === RobotStep.waitRuby) {
-      return ;
+    if (this.model.step === RobotStep.waitRuby && !this.room.gameState) {
+      this.waitUpdateRubyTime++;
+      if (!this.waitUpdateRandomTime) {
+        this.waitUpdateRandomTime = Math.floor(Math.random() * 4 + 2);
+      }
+
+      console.warn("room %s updateNoRuby start waitUpdateRubyTime %s random %s!", this.room._id, this.waitUpdateRubyTime, this.waitUpdateRandomTime);
+
+      if (this.waitUpdateRubyTime < this.waitUpdateRandomTime || this.room.gameState) {
+        return;
+      }
+
+      await this.updateNoRuby();
+      await this.save();
+      this.room.waitRechargeLists = [];
+      this.room.isWaitRecharge = false;
+      this.model.step = RobotStep.start;
+      this.waitUpdateRubyTime = 0;
+      this.waitUpdateRandomTime = 0;
+
+      console.warn("room %s updateNoRuby success!", this.room._id);
     }
 
-    isOk = await this.isNoPlayerAbsent();
-    if (!isOk) {
-      // 人没到齐
-      // console.log('some one absent %s', this.room._id);
-      if (!this.room.gameState) {
-        await this.room.forceDissolve();
+    // console.warn("222 room %s step %s", this.room._id, this.model.step);
+
+    // if (this.model.step === RobotStep.waitRuby && this.room.gameState) {
+    //   if ([GameType.mj, GameType.xueliu].includes(this.room.gameRule.gameType)) {
+    //     this.model.step = RobotStep.start;
+    //   }
+    // }
+
+    // console.warn("333 room %s step %s", this.room._id, this.model.step);
+
+    if (this.model.step === RobotStep.start && !this.room.gameState) {
+      isOk = await this.isNoPlayerAbsent();
+      if (!isOk) {
+        console.warn("player is not absent %s", this.room._id);
+        return;
       }
-      return;
     }
 
     // 检查是不是全是机器人
@@ -137,7 +177,63 @@ export class NewRobotManager {
       return;
     }
 
+    // console.warn("444 room %s step %s", this.room._id, this.model.step);
+
     await this.readyAndPlay();
+  }
+
+  // 检查金豆情况
+  async updateNoRuby() {
+    for (let i = 0; i < this.room.players.length; i++) {
+      const p = this.room.players[i];
+      if (!p || !p.isRobot() || this.room.gameState) {
+        continue;
+      }
+
+      const resp = await service.gameConfig.rubyRequired(p._id.toString(), this.room.gameRule);
+      if (resp.isNeedRuby || resp.isUpgrade) {
+        if (this.room.gameRule.gameType === GameType.guandan) {
+          // 如果场次最高无限制，则最高携带金豆为门槛*10
+          if (resp.conf.maxAmount === -1) {
+            resp.conf.maxAmount = resp.conf.minAmount * 10;
+          }
+          // 最高为随机下限的 20% - 30%
+          const rand = service.utils.randomIntBetweenNumber(10, 100) / 100;
+          const max = resp.conf.minAmount + Math.floor(rand * (resp.conf.maxAmount - resp.conf.minAmount));
+          const gold = service.utils.randomIntBetweenNumber(resp.conf.minAmount, max);
+          const randomPlayer = await service.playerService.getPlayerModel(p._id);
+          // 重新随机设置 ruby
+          if (this.room.gameRule.currency === Enums.goldCurrency) {
+            randomPlayer.gold = gold;
+          }
+          if (this.room.gameRule.currency === Enums.tlGoldCurrency) {
+            randomPlayer.tlGold = gold;
+          }
+
+          this.room.broadcast('resource/updateGold', {ok: true, data: {index: i, data: pick(randomPlayer, ['gold', 'diamond', 'tlGold', 'redPocket'])}})
+
+          // 记录金豆日志
+          await service.playerService.logGoldConsume(randomPlayer._id, ConsumeLogType.robotSetGold, gold,
+            randomPlayer.gold, `机器人开局设置游戏豆:${this.room._id}`);
+
+          await randomPlayer.save();
+        } else if (this.room.gameRule.gameType === GameType.redpocket) {
+          const randomPlayer = await service.playerService.getPlayerModel(p._id);
+          randomPlayer.redPocket = service.utils.randomIntBetweenNumber(500, 3000);
+          await randomPlayer.save();
+        } else {
+          // 金豆过多或者金豆不足，则离开房间
+          const pModel = await service.playerService.getPlayerModel(p._id);
+          console.warn("index %s isNeedRuby %s isUpgrade %s gold %s can leave", i, resp.isNeedRuby, resp.isUpgrade, pModel.gold);
+          delete this.disconnectPlayers[p._id.toString()];
+          await this.room.leave(p);
+        }
+      }
+    }
+
+    console.warn("room %s waitUpdateRubyTime %s step %s", this.room._id, this.waitUpdateRubyTime, this.model.step);
+
+    return true;
   }
 
   // 房卡房
@@ -163,7 +259,7 @@ export class NewRobotManager {
 
   // 默认出牌间隔 5s
   getWaitSecond() {
-    if (this.room.gameRule.isPublic) {
+    if (!this.room.gameRule.isPublic) {
       return Math.floor(Math.random() * 3 + 2);
     }
     return config.game.waitDelayTime;
@@ -218,7 +314,6 @@ export class NewRobotManager {
       await this.save();
     }
     this.disconnectPlayers[playerId] = robotProxy;
-    // console.warn("add robot index-%s shortId-%s gameState-%s disconnectPlayers-%s", posIndex, robotProxy.model.shortId, this.room.gameState, JSON.stringify(this.disconnectPlayers));
   }
 
   // 是否需要托管
@@ -260,13 +355,13 @@ export class NewRobotManager {
     for (const key of Object.keys(this.disconnectPlayers)) {
       const index = this.room.players.findIndex(value => value && value._id.toString() === key.toString());
       if (index === -1) {
-        console.log('no such player to order', key, 'room id', this.room._id)
+        console.log('no such player to order players', key, 'room id', this.room._id, JSON.stringify(this.room.players))
         delete this.disconnectPlayers[key];
       } else {
         const proxy = this.disconnectPlayers[key];
         proxy.seatIndex = index;
       }
-      // 更新京豆房中机器人的位置
+      // 更新金豆房中机器人的位置
       for (const robot of this.model.publicRoomRobot) {
         if (robot[0] === key) {
           robot[1] = index;
@@ -288,8 +383,6 @@ export class NewRobotManager {
   async gameOver() {
     clearInterval(this.watchTimer);
     if (this.disconnectPlayers) {
-      console.log('destroy robot', this.room._id);
-
       // 扣除房间数
       this.disconnectPlayers = null;
       await service.roomRegister.decrPublicRoomCount(this.room.gameRule.gameType, this.room.gameRule.categoryId);
@@ -299,7 +392,7 @@ export class NewRobotManager {
   // 玩家是否到齐
   async isNoPlayerAbsent() {
     const count = this.room.players.filter(x => x).length;
-    return count === this.room.gameRule.playerCount;
+    return count === this.room.gameRule.playerCount || this.room.gameState;
   }
 
   // 代理用户是否在线
@@ -329,21 +422,35 @@ export class NewRobotManager {
   async isHumanPlayerReady() {
     let index;
     let isOffline;
+
+    // 有在线用户没点下一局
+    this.waitKickOutTime++;
+
     for (const proxy of this.room.players) {
       if (!proxy) {
         continue;
       }
+
       isOffline = this.isHumanPlayerOffline(proxy);
       if (!isOffline) {
         // 在线用户且非机器人
         index = this.room.readyPlayers.findIndex((p: any) => p.toString() === proxy.model._id.toString());
         if (index === -1) {
-          // 有在线用户没点下一局
-          // console.log(`human player ${proxy.model.shortId} not ready in room ${this.room._id}`);
+          // 在线用户超过10秒没有点击继续就踢出局
+          if (this.waitKickOutTime >= config.game.waitKickOutTime && ![GameType.ddz, GameType.zd, GameType.guandan].includes(this.room.gameRule.gameType)) {
+            const playerIndex = this.room.players.findIndex(p => p._id.toString() === proxy.model._id.toString());
+            if (playerIndex !== -1) {
+              this.room.broadcast("game/kickOutPlayer", {ok: true, data: {index: playerIndex}});
+              await this.room.leave(proxy);
+            }
+          }
+
           return false;
         }
       }
     }
+
+    this.waitKickOutTime = 0;
     return true;
   }
 
@@ -367,38 +474,41 @@ export class NewRobotManager {
   }
 
   async addRobotForPublicRoom() {
-    if (this.waitPublicRobot < config.game.waitRubyPlayer || this.room.gameState) {
-      if (!this.room.gameState) {
-        console.warn("timeCheck-%s, gameState-%s", this.waitPublicRobot < config.game.waitRubyPlayer, !!this.room.gameState);
-      }
+    if (!this.waitPublicRobotSecond) {
+      this.waitPublicRobotSecond = Math.floor(Math.random() * config.game.waitRubyPlayer + 1);
+    }
+    if (this.waitPublicRobot < this.waitPublicRobotSecond || this.room.gameState) {
+      // console.warn("addRobotForPublicRoom fail waitPublicRobot %s waitPublicRobotSecond %s gameState %s", this.waitPublicRobot, this.waitPublicRobotSecond, !!this.room.gameState);
       // 时间未到，或者已经有机器人
       return;
     }
 
-    for (let i = 1; i < this.room.players.length; i++) {
-      const playerId = await this.getOfflinePlayerByIndex(i)
+    for (let i = 0; i < this.room.players.length; i++) {
+      const playerId = await this.getOfflinePlayerByIndex(i);
       if (playerId !== "" || this.room.players[i]) {
-        if (!this.room.gameState) {
-          // console.warn("index-%s, playerId-%s is in room", i, playerId);
-        }
-
         continue;
       }
 
-      const model = await service.playerService.getRobot(this.room.gameRule.categoryId, this.room._id, this.room.game.rule.currency);
+      // 重新计时
+      this.waitPublicRobotSecond = 0;
+      this.waitPublicRobot = 0;
+
+      const model = await service.playerService.getRobot(this.room.gameRule.categoryId, this.room._id, this.room.game.rule.currency, this.room.game.rule.gameType);
       const robotProxy = await this.createProxy(model._id.toString());
       robotProxy.seatIndex = i;
       robotProxy.isPublicRobot = true;
       // 加入房间
       const isOk = await this.room.join(robotProxy);
       if (isOk) {
-        // console.warn("add robot index-%s shortId-%s", i, model.shortId);
+        console.warn("add robot index-%s shortId-%s", i, model.shortId);
         // 公共房托管的机器人
         this.model.publicRoomRobot.push([model._id, i]);
         await this.addPublicRobot(model._id, robotProxy, i);
         // 添加离线时间
         this.model.offlineTimes[model._id] = config.game.offlineDelayTime;
       }
+
+      break;
     }
     // 保存房间信息
     await service.roomRegister.saveRoomInfoToRedis(this.room);
@@ -445,43 +555,8 @@ export class NewRobotManager {
       await this.room.forceDissolve();
       return true;
     }
+
     return false;
-  }
-
-  // 检查金豆情况
-  async updateNoRuby() {
-    let waitRuby = false;
-    for (let i = 0; i < this.room.gameState.players.length; i++) {
-      const p = this.room.gameState.players[i];
-      if (!p || p.isBroke || !this.room.gameState) {
-        continue;
-      }
-      const resp = await service.gameConfig.rubyRequired(
-        p.model._id.toString(),
-        this.room.gameRule.categoryId);
-      if (resp.isResurrection) {
-        if (!this.noRubyInterval[p.model._id.toString()]) {
-          this.noRubyInterval[p.model._id.toString()] = 0;
-        }
-        this.noRubyInterval[p.model._id.toString()]++;
-        // 等待 30s 充值时间
-        if (this.noRubyInterval[p.model._id.toString()] > config.game.waitForRuby) {
-          // 30s 过了，金豆还是不够，用户破产
-          console.warn("index-%s is already broke", i);
-          // p.emitter.emit(Enums.broke);
-        } else {
-          waitRuby = true;
-        }
-      } else {
-        // 删除等待时间
-        delete this.noRubyInterval[p.model._id.toString()];
-      }
-
-      this.waitInterval[p._id] = 0;
-    }
-
-
-    return waitRuby;
   }
 
   // 更新出牌时间
@@ -504,20 +579,25 @@ export class NewRobotManager {
   }
 
   async nextRound() {
-    // 更新位置
-    if (this.model.step !== RobotStep.running) {
-      return;
+    try {
+      // 更新位置
+      if (this.model.step !== RobotStep.running) {
+        return;
+      }
+      await this.updatePlayerOrder();
+      await this.decreaseDepositTimes();
+      if (this.room.isPublic) {
+        // 金豆房，要检查金豆
+        this.model.step = RobotStep.waitRuby;
+      } else {
+        this.model.step = RobotStep.start;
+      }
+      await this.save();
+      console.log('next round', this.room._id)
+    } catch (e) {
+      console.warn(e);
     }
-    await this.updatePlayerOrder();
-    await this.decreaseDepositTimes();
-    if (this.room.isPublic) {
-      // 金豆房，要检查金豆
-      this.model.step = RobotStep.waitRuby;
-    } else {
-      this.model.step = RobotStep.start;
-    }
-    await this.save();
-    console.log('next round', this.room._id)
+
   }
 
   async readyAndPlay() {
@@ -527,14 +607,19 @@ export class NewRobotManager {
       const flag = await this.robotPlayerReady();
       isOk = await this.isHumanPlayerReady();
       if (!isOk) {
-        // console.log(`human player not ready`, this.room._id);
+        console.log(`human player not ready `, this.room._id);
         return;
       }
+
+      console.warn("flag %s step %s", flag, this.model.step);
+
       if ((flag && this.room.isPublic) || !this.room.isPublic) {
         this.model.step = RobotStep.running;
       }
       await this.save();
     }
+
+    // console.warn("555 room %s step %s", this.room._id, this.model.step);
 
     if (this.model.step === RobotStep.waitOherDa) {
       return;
@@ -566,7 +651,7 @@ export class NewRobotManager {
         if (this.waitInterval[key] >= this.getWaitSecond()) {
           this.waitInterval[key] = 0;
           await proxy.playCard();
-          console.log(playerId, 'play card', this.room._id)
+          // console.log(playerId, 'play card', this.room._id)
         }
         break;
       }
@@ -588,11 +673,16 @@ export class NewRobotManager {
 
   async getPlayerIndexByPlayerId(playerId) {
     for (let i = 0; i < this.room.players.length; i++) {
-      if (this.room.players[i] && this.room.players[i].model._id === playerId) {
-        return i
+      // if (this.room.players[i]) {
+      //   console.warn(this.room.players[i].model._id.toString(), playerId);
+      // }
+      if (this.room.players[i] && this.room.players[i].model._id.toString() === playerId.toString()) {
+        return i;
       }
     }
-    console.error("no seatIndex found", playerId, this.room._id)
-    return -1
+    console.error("no seatIndex found", playerId, this.room._id, JSON.stringify(this.room.players.map(v => {
+      return v.model._id
+    })));
+    return -1;
   }
 }

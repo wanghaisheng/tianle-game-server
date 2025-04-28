@@ -14,7 +14,7 @@ import createClient from "../utils/redis"
 import {IPlayerModel, ISocketPlayer} from "./ISocketPlayer"
 import accountHandlers from './message-handlers-rmq/account'
 import chatHandlers from './message-handlers-rmq/chat'
-import clubHandlers from './message-handlers-rmq/club';
+import clubHandlers, {getClubInfo} from './message-handlers-rmq/club';
 import errorHandlers from './message-handlers-rmq/error'
 import gameHandlers from './message-handlers-rmq/game'
 import {GameApi} from "./message-handlers-rmq/gameApi";
@@ -151,15 +151,6 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
     })
   }
 
-  getDebugMessage(data) {
-    let content = data
-    if (content.length > 1024) {
-      content = `${content.slice(0, 1024)}...`
-    }
-
-    return content
-  }
-
   getLocation(onGetData?) {
     // const options = {
     //   hostname: 'int.dpool.sina.com.cn',
@@ -232,20 +223,6 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
     return (this.model && this.model.gold) || 0
   }
 
-  addGold(v) {
-    if (this.model) {
-      let g = this.model.gold
-      g += v
-      this.model.gold = g
-      this.sendMessage('resource/update', {ok: true, data: {gold: g, diamond: this.model.diamond, tlGold: this.model.tlGold}})
-      PlayerModel.update({_id: this.model._id}, {$set: {gold: g}}, err => {
-          if (err) {
-            logger.error(err)
-          }
-        })
-    }
-  }
-
   onDisconnect() {
     this.emit('disconnect', {from: this._id})
 
@@ -265,20 +242,25 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
   }
 
   async disconnect() {
-    this.isDone = true
-    logger.info(`Disconnect player: ${this._id}`, this.socketId)
+    try {
+      this.isDone = true
+      logger.info(`Disconnect player: ${this._id}`, this.socketId)
 
-    if (this.socket) {
-      const promise = new Promise(resolve => {
-        this.once('disconnect', () => resolve())
-      })
+      if (this.socket) {
+        const promise = new Promise(resolve => {
+          this.once('disconnect', () => resolve())
+        })
 
-      rediClient.decrAsync(`gameCounter.${this.gameName}`)
-        .then()
-      this.socket.close()
-      this.socket.terminate()
-      await promise
+        rediClient.decrAsync(`gameCounter.${this.gameName}`)
+          .then()
+        this.socket.close()
+        this.socket.terminate()
+        await promise
+      }
+    } catch(e) {
+      logger.info(e);
     }
+
   }
 
   sendMessage(name, message) {
@@ -365,6 +347,30 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
             }
 
             this.currentRoom = messageBody.payload.data._id
+            // await this.cancelListenClub(this.clubId)
+          }
+
+          // 创建俱乐部房间通知俱乐部用户
+          // if (messageBody.name === 'newClubRoomCreated') {
+          //   const clubInfo = getClubInfo(this.clubId, this);
+          //   this.sendMessage('club/newClubRoomCreatedReply', clubInfo);
+          //   return;
+          // }
+
+          // 加入俱乐部房间通知用户
+          if (messageBody.name === 'club/updateClubRoom') {
+            const sendFunc = async() => {
+              const clubInfo = await getClubInfo(this.clubId, this);
+              // console.warn("clubInfo-%s, redis-%s", JSON.stringify(clubInfo), config.redis);
+
+              if (clubInfo.ok) {
+                this.sendMessage('club/getClubInfoReply', clubInfo);
+              }
+
+              return;
+            }
+
+            setTimeout(sendFunc, 1000);
           }
 
           if (messageBody.name === 'resource/update') {
@@ -382,6 +388,20 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
 
     } catch (e) {
       logger.error('connectToBackend error', this.socketId, e)
+    }
+  }
+
+  async listenClub(clubId = -1) {
+    if (this.channel && clubId) {
+      await this.channel.assertExchange(`exClubCenter`, 'topic', {durable: false})
+      await this.channel.bindQueue(this.myQueue, `exClubCenter`, `club:${clubId}`)
+      this.clubId = clubId;
+    }
+  }
+
+  async cancelListenClub(clubId = -1) {
+    if (this.channel && clubId) {
+      await this.channel.unbindQueue(this.myQueue, `exClubCenter`, `club:${clubId}`)
     }
   }
 
@@ -404,7 +424,7 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
     const playerIp = this.getIpAddress()
     if (!this.currentRoom) {
       logger.error('player is not in room', name, message)
-      this.sendMessage("room/leaveReply", {ok: true, data: {_id: this._id}})
+      // this.sendMessage("room/leaveReply", {ok: true, data: {_id: this._id}})
       return
     }
 
@@ -421,7 +441,7 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
   }
 
   setGameName(gameType) {
-    this.gameName = gameType || 'paodekuai';
+    this.gameName = gameType || 'shisanshui';
   }
 
   requestToRoom(roomId, name, message) {
@@ -452,6 +472,6 @@ export default class SocketPlayer extends EventEmitter implements ISocketPlayer 
       return;
     }
     const model = await service.playerService.getPlayerModel(this.model._id);
-    this.sendMessage('resource/update', {ok: true, data: {gold: model.gold, diamond: model.diamond, tlGold: model.tlGold }});
+    this.sendMessage('resource/update', {ok: true, data: {gold: model.gold, diamond: model.diamond, tlGold: model.tlGold, redPocket: model.redPocket }});
   }
 }

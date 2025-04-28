@@ -8,6 +8,8 @@ import {autoSerializePropertyKeys} from "../serializeDecorator";
 import Room from "./room";
 import NormalTable from "./normalTable"
 import {GameTypes} from "../gameTypes";
+import Enums from "./enums";
+import {stateGameOver} from "../xmmajiang/table_state";
 
 const gameType: GameTypes = GameType.ddz
 
@@ -22,15 +24,28 @@ export class PublicRoom extends Room {
   static async recover(json: any, repository: { channel: Channel, userCenter: any }): Promise<Room> {
 
     const room = new PublicRoom(json.gameRule, json._id);
+    room.uid = json.uid;
     const gameAutoKeys = autoSerializePropertyKeys(room.game);
     Object.assign(room.game, pick(json.game, gameAutoKeys));
 
     const keys = autoSerializePropertyKeys(room);
     Object.assign(room, pick(json, keys));
-    for (const [index, playerId] of json.snapshot.entries()) {
-      room.playersOrder[index] = room.players[index] = room.snapshot[index] = await getPlayerRmqProxy(playerId,
-        repository.channel, gameType);
+
+    for (const [index, playerId] of json.playersOrder.entries()) {
+      if (playerId) {
+        const playerRmq = await getPlayerRmqProxy(playerId, repository.channel, GameType.mj);
+        playerRmq.room = room;
+        if (json.players[index]) {
+          room.players[index] = playerRmq
+        }
+        room.playersOrder[index] = playerRmq;
+      }
     }
+
+    for (const [index, playerId] of json.snapshot.entries()) {
+      room.snapshot[index] = await getPlayerRmqProxy(playerId, repository.channel, GameType.mj);
+    }
+
     room.creator = await getPlayerRmqProxy(json.creator, repository.channel, gameType);
 
     if (json.gameState) {
@@ -49,23 +64,26 @@ export class PublicRoom extends Room {
       }, delayTime)
     }
 
+    // await room.init();
+
     return room;
   }
 
   leave(player) {
-    if (!player) {
-      // 玩家不存在
-      return false;
+    if (this.gameState || !player) {
+      // 游戏已开始 or 玩家不存在
+      return false
     }
     if (this.indexOf(player) < 0) {
       return true
     }
     player.removeListener('disconnect', this.disconnectCallback)
     this.removePlayer(player)
-    this.removeReadyPlayer(player.model._id.toString())
+    this.removeOrder(player);
     player.room = null
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player.model._id.toString(), roomId: this._id}})
-    this.clearScore(player.model._id.toString())
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player.model._id, location: "xmmj.publicRoom", players: this.players}})
+    this.removeReadyPlayer(player.model._id)
+    this.clearScore(player.model._id)
 
     return true
   }
@@ -73,66 +91,47 @@ export class PublicRoom extends Room {
   // 更新 ruby
   async addScore(playerId, v) {
     const findPlayer = this.players.find(player => {
-      return player && player.model._id.toString() === playerId
+      return player && player.model._id.toString() === playerId.toString()
     })
-    // 添加倍率
-    let conf = await service.gameConfig.getPublicRoomCategoryByCategory(this.gameRule.categoryId);
-    if (!conf) {
-      console.error('game config lost', this.gameRule.categoryId);
-      conf = {
-        roomRate: 10000,
-        minAmount: 10000,
-      }
-    }
-    const model = await this.updatePlayer(playerId, v);
-    if (findPlayer && findPlayer.isPublicRobot) {
-      // 金豆机器人,自动加金豆
-      if (model.gold < conf.minAmount && !this.gameState) {
-        // 金豆不足，添加金豆
-        const rand = service.utils.randomIntBetweenNumber(2, 3) / 10;
-        const max = conf.minAmount + Math.floor(rand * (conf.maxAmount - conf.minAmount));
-        model.gold = service.utils.randomIntBetweenNumber(conf.minAmount, max);
-        await service.playerService.logGoldConsume(model._id, ConsumeLogType.robotAutoAdd, model.gold,
-          model.gold, `机器人自动加金豆`);
-        await model.save();
-      }
-      return;
-    }
 
-    if (findPlayer) {
-      findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
-      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold}})
-    }
+    await this.updatePlayer(playerId, v);
+    findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
+    findPlayer.sendMessage('resource/update', {ok: true, data: pick(findPlayer.model, ['gold', 'diamond', 'tlGold', 'redPocket'])})
   }
 
   // 更新 player model
-  async updatePlayer(playerId, addRuby = 0, addGem = 0) {
-    const model = await service.playerService.getPlayerModel(playerId);
-    if (!model) {
-      console.error('player not exists');
-      return;
-    }
+  async updatePlayer(playerId, addRuby = 0) {
     // 添加金豆
-    if (!isNaN(addRuby)) {
-      if (model.gold + addRuby <= 0) {
-        model.gold = 0;
-      } else {
-        model.gold += addRuby;
-      }
+    const currency = await this.PlayerGoldCurrency(playerId);
+    if (currency + addRuby <= 0) {
+      await this.setPlayerGoldCurrency(playerId, 0);
+    } else {
+      await this.setPlayerGoldCurrency(playerId, currency + addRuby);
+    }
+    return await service.playerService.getPlayerModel(playerId);
+  }
+
+  async PlayerGoldCurrency(playerId) {
+    const model = await service.playerService.getPlayerModel(playerId);
+
+    if (this.game.rule.currency === Enums.goldCurrency) {
+      return model.gold;
     }
 
-    // 添加房卡
-    if (!isNaN(addGem)) {
-      if (model.diamond + addGem <= 0) {
-        model.diamond = 0;
-      } else {
-        model.diamond += addGem;
-      }
+    return model.tlGold;
+  }
+
+  // 根据币种类型设置币种余额
+  async setPlayerGoldCurrency(playerId, currency) {
+    const model = await service.playerService.getPlayerModel(playerId);
+
+    if (this.game.rule.currency === Enums.goldCurrency) {
+      model.gold = currency;
+    } else {
+      model.tlGold = currency;
     }
 
     await model.save();
-
-    return model;
   }
 
   async joinMessageFor(newJoinPlayer): Promise<any> {
@@ -149,7 +148,6 @@ export class PublicRoom extends Room {
   // 检查房间是否升级
   async nextGame(thePlayer) {
     if (!this.robotManager && thePlayer) {
-      // console.warn("public room error start")
       return thePlayer.sendMessage('room/joinReply', {ok: false, info: TianleErrorCode.roomIsFinish})
     }
     // 检查金豆
@@ -211,7 +209,7 @@ export class PublicRoom extends Room {
         await service.playerService.logGoldConsume(p._id, ConsumeLogType.payGameFee, -conf.roomRate,
           p.model.gold, `扣除房费`);
         // 通知客户端更新金豆
-        this.updateResource2Client(p)
+        await this.updateResource2Client(p)
       }
     }
   }

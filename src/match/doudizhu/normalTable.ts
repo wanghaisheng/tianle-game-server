@@ -1,14 +1,13 @@
 import Card, {CardType} from "./card"
-import {
-  findFullMatchedPattern,
-  findMatchedPatternByPattern,
-} from "./patterns"
+import {findFullMatchedPattern, findMatchedPatternByPattern,} from "./patterns"
 import {IPattern, PatterNames} from "./patterns/base"
 import PlayerState from "./player_state"
 import Rule from './Rule'
-import Table from './table'
+import Table, {stateGameOver} from './table'
 import {GameType} from "@fm/common/constants";
 import enums from "./enums";
+import Enums from "./enums";
+import {service} from "../../service/importService";
 
 function once(target, propertyKey: string, descriptor: PropertyDescriptor) {
   const originCall = descriptor.value
@@ -53,27 +52,27 @@ export default class NormalTable extends Table {
   async start(payload) {
     await this.fapai(payload)
     this.status.current.seatIndex = -1
-    this.startStateUpdate()
+    await this.startStateUpdate()
   }
 
-  startStateUpdate() {
+  async startStateUpdate() {
     if (this.room.game.lastWinnerShortId !== -1) {
       // 有上一局赢的人,则赢家先选择地主
       for (let i = 0; i < this.players.length; i++) {
         const p = this.players[i];
         if (p.model.shortId === this.room.game.lastWinnerShortId) {
-          this.setFirstDa(i);
+          await this.setFirstDa(i);
           break;
         }
       }
     } else {
-      this.setFirstDa(0);
+      await this.setFirstDa(0);
     }
 
-    // 测试多人明牌
-    // for (let i = 0; i < this.players.length; i++) {
-    //   this.players[i].emitter.emit(enums.openDeal, {multiple: i + 3});
-    // }
+    // console.warn("firstDa-%s", this.status.current.seatIndex);
+    if (this.status.current.seatIndex === -1) {
+      return ;
+    }
 
     // 判断是否有用户明牌，取明牌最高倍数
     let maxMultiple = 0;
@@ -86,39 +85,15 @@ export default class NormalTable extends Table {
       this.multiple = maxMultiple;
     }
 
-    // 如果已经重新叫地主第三轮，则设置0号位为地主，直接开局
-    if (this.resetCount === 2) {
-      this.broadcastLandlordAndPlayer();
-    } else {
-      this.broadcastChooseMode();
-    }
+    // 设置用户为不托管
+    this.players.map(p => p.onDeposit = false);
 
-  }
-
-  broadcastLandlordAndPlayer() {
-    // 庄家成为地主
-    this.zhuang.mode = enums.landlord;
-    // 将地主牌发给用户
-    const cards = this.cardManager.getLandlordCard();
-    this.zhuang.cards = [...this.zhuang.cards, ...cards];
-    this.room.broadcast("game/openLandlordCard", {ok: true, data: {seatIndex: this.zhuang.index, landlordCards: cards, cards: this.zhuang.cards}});
-
-    const startDaFunc = async() => {
-      this.status.current.seatIndex = this.zhuang.index;
-
-      // 下发开始翻倍消息
-      this.room.broadcast('game/startChooseMultiple', {ok: true, data: {}});
-
-      // 托管状态自动选择不翻倍
-      this.players.map(p => this.depositForPlayerChooseMultiple(p));
-    }
-
-    setTimeout(startDaFunc, 500);
+    this.broadcastChooseMode();
   }
 
   broadcastChooseMode() {
     const startChooseModeFunc = async() => {
-      this.tableState = ''
+      this.tableState = '';
       this.room.broadcast('game/startChooseMode', {ok: true, data: {index: this.currentPlayerStep}})
 
       setTimeout(chooseModeFunc, 1000);
@@ -128,13 +103,12 @@ export default class NormalTable extends Table {
 
 
     const chooseModeFunc = async() => {
-      // this.players[this.currentPlayerStep].emitter.emit(enums.chooseMode, {mode: enums.farmer});
-      // this.depositForPlayerChooseMode(this.players[this.currentPlayerStep]);
+      this.state = 1;
       this.players[this.currentPlayerStep].emitter.emit(enums.waitForPlayerChooseMode);
     }
   }
 
-  setFirstDa(startPlayerIndex: number) {
+  async setFirstDa(startPlayerIndex: number) {
     this.status.current.seatIndex = startPlayerIndex;
     // 第一个打的
     this.audit.setFirstPlay(this.players[startPlayerIndex].model.shortId);
@@ -165,16 +139,15 @@ export default class NormalTable extends Table {
     super.listenPlayer(player)
   }
 
-  reconnectContent(index, reconnectPlayer: PlayerState) {
+  async reconnectContent(index, reconnectPlayer: PlayerState) {
     const stateData = this.stateData;
     const juIndex = this.room.game.juIndex;
+    const status = [];
 
-    const status = this.players.map(player => {
-      return player._id.toString() === reconnectPlayer._id.toString() ? {
-        ...player.statusForSelf(this),
-        teamMateCards: this.teamMateCards(player)
-      } : player.statusForOther(this)
-    })
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      status.push(p._id.toString() === reconnectPlayer._id.toString() ? await p.statusForSelf(this) : await p.statusForOther(this));
+    }
     const currentPlayerIndex = this.status.current.seatIndex;
 
     return {
@@ -184,6 +157,8 @@ export default class NormalTable extends Table {
       lastIndex: this.status.lastIndex,
       from: this.status.from,
       foundFriend: this.foundFriend,
+      landlordCards: this.landlordCards,
+      isGameRunning: this.state !== stateGameOver,
       index,
       juIndex,
       stateData,
@@ -201,21 +176,111 @@ export default class NormalTable extends Table {
     await super.onPlayerDa(player, {cards: plainCards})
   }
 
+  async recordRubyReward() {
+    if (!this.room.isPublic) {
+      return null;
+    }
+    // 金豆房记录奖励
+    await this.getBigWinner();
+  }
+
+  async getBigWinner() {
+    // 将分数 * 倍率
+    const conf = await service.gameConfig.getPublicRoomCategoryByCategory(this.room.gameRule.categoryId);
+    let times = conf.base * conf.Ante;
+
+    // 查询斗地主的赢家
+    const winnerId = this.players.findIndex(p => p.cards.length === 0);
+    const winner = this.players[winnerId];
+    let winnerUpgradeGold = winner.multiple * times;
+    let winnerGold = 0;
+    const currency = await this.PlayerGoldCurrency(winner._id);
+    if (winnerUpgradeGold > currency) {
+      winnerUpgradeGold = currency;
+    }
+
+    // 赢家是地主
+    if (winner.mode === enums.landlord) {
+      for (let i = 0; i < this.players.length; i ++) {
+        const p = this.players[i];
+
+        // 赢家是地主
+        if (p._id.toString() !== winner._id.toString()) {
+          const currency = await this.PlayerGoldCurrency(p._id);
+          let changeGold = Math.floor(winnerUpgradeGold * p.multiple / winner.multiple);
+          if (changeGold > currency) {
+            changeGold = currency;
+          }
+
+          p.balance = -changeGold;
+          winnerGold += changeGold;
+        }
+      }
+
+      winner.balance = winnerGold;
+    }
+
+    // 赢家是农民
+    if (winner.mode === enums.farmer) {
+      // 查询地主
+      const landloadId = this.players.findIndex(p => p.mode === enums.landlord);
+      const landload = this.players[landloadId];
+      let landloadUpgradeGold = landload.multiple * times;
+      const landloadCurrency = await this.PlayerGoldCurrency(landload._id);
+      if (landloadUpgradeGold > landloadCurrency) {
+        landloadUpgradeGold = landloadCurrency;
+      }
+      let landloadDeductGold = 0;
+
+      for (let i = 0; i < this.players.length; i ++) {
+        const p = this.players[i];
+
+        // 赢家是地主
+        if (p._id.toString() !== landload._id.toString()) {
+          const currency = await this.PlayerGoldCurrency(p._id);
+          let playerWinnerGold = Math.floor(landloadUpgradeGold * p.multiple / landload.multiple);
+          if (playerWinnerGold > currency) {
+            playerWinnerGold = currency;
+          }
+          p.balance = playerWinnerGold;
+          landloadDeductGold += playerWinnerGold;
+        }
+      }
+
+      landload.balance = -landloadDeductGold;
+    }
+  }
+
+  // 根据币种类型获取币种余额
+  async PlayerGoldCurrency(playerId) {
+    const model = await service.playerService.getPlayerModel(playerId);
+
+    if (this.rule.currency === Enums.goldCurrency) {
+      return model.gold;
+    }
+
+    return model.tlGold;
+  }
+
   async gameOver() {
+    this.state = 4;
+
     // 设置剩余牌数
     this.updateRemainCards();
 
     this.settler();
-    // console.warn("settler-%s", JSON.stringify(this.settler));
 
-    // this.audit.print();
+    await this.recordRubyReward();
+
     const states = this.players.map(p => {
       const auditInfo = this.audit.currentRound[p.model.shortId];
       return {
         model: p.model,
         index: p.index,
-        score: p.balance,
+        score: this.room.isPublic ? p.balance : this.getGameMultiple(p),
+        multiple: p.multiple,
         detail: p.detailBalance,
+        mode: p.mode,
         // 统计信息
         audit: {
           remainCards: auditInfo.remainCards,
@@ -229,6 +294,7 @@ export default class NormalTable extends Table {
 
     const gameOverMsg = {
       states,
+      gameType: GameType.ddz,
       juShu: this.restJushu,
       isPublic: this.room.isPublic,
       juIndex: this.room.game.juIndex,
@@ -238,19 +304,29 @@ export default class NormalTable extends Table {
     this.room.broadcast('game/gameOverReply', {ok: true, data: gameOverMsg})
     this.stateData.gameOver = gameOverMsg
 
-    let firstPlayer = this.players.find(p => p.cards.length === 0)
+    let firstPlayer = this.players.find(p => p.cards.length === 0);
 
     await this.roomGameOver(states, firstPlayer._id);
+  }
+
+  getGameMultiple(player) {
+    const score = Math.abs(player.balance);
+    if (this.rule.capping === -1) {
+      return player.balance;
+    }
+
+    if (player.mode === enums.landlord) {
+      return score > this.rule.capping ? (player.balance > 0 ? this.rule.capping : -this.rule.capping) : player.balance;
+    }
+
+    return score > this.rule.capping / 2 ? (player.balance > 0 ? this.rule.capping / 2 : -this.rule.capping / 2) : player.balance;
   }
 
   private shangYouSettler() {
     const multiples = [];
     const winner = this.players.find(p => p.cards.length === 0);
 
-    // console.warn("winner-%s, losers-%s", JSON.stringify(winner), JSON.stringify(losers));
     this.players.map((v) => {multiples.push({index: v.index, multiple: v.multiple, mode: v.mode})});
-    const springPlayers = this.audit.isSpring();
-    console.warn("multiples-%s, springPlayers-%s", JSON.stringify(multiples), JSON.stringify(springPlayers));
 
     // 如果赢家是地主
     if (winner.mode === enums.landlord) {
@@ -258,7 +334,6 @@ export default class NormalTable extends Table {
 
       // 判断是否春天
       let isSpring = true;
-      let fanShu = 1;
       for (let i = 0; i < losers.length; i++) {
         if (losers[i].cards.length !== 17) {
           isSpring = false;
@@ -266,26 +341,34 @@ export default class NormalTable extends Table {
       }
 
       if (isSpring) {
-        fanShu = 2;
+        this.players.map(player => {
+          player.multiple *= 2;
+          player.sendMessage("game/multipleChange", {ok: true, data: {seatIndex: player.index, multiple: player.multiple, changeMultiple: 2}});
+        })
+
+        this.room.broadcast("game/showSpring", {ok: true, data: {}});
       }
 
       // 计算积分
-      losers.map(p => winner.winFrom(p, p.multiple * fanShu));
+      losers.map(p => winner.winFrom(p, p.multiple));
     }
 
     // 如果赢家是农民
     if (winner.mode === enums.farmer) {
       const loser = this.players.find(p => p.mode === enums.landlord);
       const famers = this.players.filter(p => p.mode === enums.farmer);
-      let fanShu = 1;
 
       // 判断是否反春天
       if (this.audit.currentRound[loser.model.shortId].playTimes === 1) {
-        fanShu = 2;
+        this.players.map(player => {
+          player.multiple *= 2;
+          player.sendMessage("game/multipleChange", {ok: true, data: {seatIndex: player.index, multiple: player.multiple, changeMultiple: 2}});
+        })
+        this.room.broadcast("game/showSpring", {ok: true, data: {}});
       }
 
       // 计算积分
-      famers.map(p => p.winFrom(loser, p.multiple * fanShu));
+      famers.map(p => p.winFrom(loser, p.multiple));
     }
   }
 
@@ -301,21 +384,6 @@ export default class NormalTable extends Table {
   updateRemainCards() {
     for (const p of this.players) {
       this.audit.setRemainCards(p.model.shortId, p.cards);
-    }
-  }
-
-  // 更新炸弹分
-  updateBoomScore() {
-    let score;
-    for (const p of this.players) {
-      for (const pp of this.players) {
-        if (p.model.shortId !== pp.model.shortId) {
-          score = this.audit.boomScore(p.model.shortId);
-          if (score > 0) {
-            p.winFrom(pp, score);
-          }
-        }
-      }
     }
   }
 };

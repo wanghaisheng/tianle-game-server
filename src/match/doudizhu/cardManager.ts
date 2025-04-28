@@ -1,4 +1,3 @@
-import {service} from "../../service/importService";
 import algorithm from "../../utils/algorithm";
 import Card, {CardTag, CardType, clubs, diamonds, hearts, spades} from "./card";
 
@@ -48,17 +47,18 @@ export class CardManager {
   }
 
   // 为每个玩家发牌
-  genCardForEachPlayer(isSorted?, customCards?, test?) {
+  genCardForEachPlayer(isSorted?, customCards?, test?, players?) {
     // 洗牌
     let newCardTags = this.cardTags.slice();
     // 为每个玩家创建空列表
     const playerCards = Array.from(new Array(this.playerCount), () => []);
+    // 洗牌
+    algorithm.shuffle(newCardTags);
+
     if (!isSorted) {
-      // 随机发牌
-      algorithm.shuffle(newCardTags);
-      let count = this.playerCardCount;
+      // 如果需要测试发牌，先发测试牌
       for (let i = 0; i < playerCards.length; i++) {
-        for (let j = 0; j < count; j++) {
+        for (let j = 0; j < this.playerCardCount; j++) {
           if (test && customCards[i] && customCards[i].length > j) {
             // 将指定发牌从牌堆中移除
             const cardIndex = newCardTags.findIndex(c => c === customCards[i][j]);
@@ -66,32 +66,280 @@ export class CardManager {
               const card = newCardTags[cardIndex];
               newCardTags.splice(cardIndex, 1);
               playerCards[i].push(card);
-            } else {
-              const card = newCardTags.pop();
-              playerCards[i].push(card);
             }
-          } else {
-            const card = newCardTags.pop();
-            playerCards[i].push(card);
           }
         }
       }
-      // while (count > 0) {
-      //   // 每个玩家取一张牌
-      //   for (const pc of playerCards) {
-      //     const card = newCardTags.pop();
-      //     pc.push(card);
-      //   }
-      //   count--;
-      // }
-    } else {
-      // 将牌排序以后再发
-      const randomList = this.orderCardTagBySameValue(newCardTags);
-      for (let i = 0; i < this.playerCount; i++) {
-        playerCards[i] = randomList.slice(i * this.playerCardCount, (i + 1) * this.playerCardCount);
+
+      // 补发剩余牌
+      for (let i = 0; i < playerCards.length; i++) {
+        for (let j = playerCards[i].length; j < this.playerCardCount; j++) {
+          const card = newCardTags.pop();
+          playerCards[i].push(card);
+        }
       }
-      // 剩下的扑克
-      newCardTags = randomList.slice(this.playerCount * this.playerCardCount);
+    } else {
+      // 计算炸弹
+      let bombs = [];
+      for (let k = CardTag.ha; k <= CardTag.hk; k++) {
+        const cardCount = newCardTags.filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+        if (cardCount === 4) {
+          bombs.push(k);
+        }
+      }
+
+      // 计算飞机和三张
+      let straightTriples = [];
+      let triples = [];
+      for (let k = CardTag.ha; k <= CardTag.hk; k++) {
+        const cardCount = newCardTags.filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+        const nextCardCount = newCardTags.filter(c => [k + 1, k + 14, k + 27, k + 40].includes(c)).length;
+        if (cardCount >= 3) {
+          triples.push(k);
+        }
+        if (cardCount >= 3 && nextCardCount >= 3) {
+          straightTriples.push(k);
+        }
+      }
+
+      // 计算顺子
+      // let straights = [];
+      // for (let k = CardTag.ha; k <= CardTag.h9; k++) {
+      //   const cardCount1 = newCardTags.filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+      //   const cardCount2 = newCardTags.filter(c => [k + 1, k + 14, k + 27, k + 40].includes(c)).length;
+      //   const cardCount3 = newCardTags.filter(c => [k + 2, k + 15, k + 28, k + 41].includes(c)).length;
+      //   const cardCount4 = newCardTags.filter(c => [k + 3, k + 16, k + 29, k + 42].includes(c)).length;
+      //   const cardCount5 = newCardTags.filter(c => [k + 4, k + 17, k + 30, k + 43].includes(c)).length;
+      //   if (cardCount1 && cardCount2 && cardCount3 && cardCount4 && cardCount5) {
+      //     straights.push(k);
+      //   }
+      // }
+
+      const allocationBombs = [];
+      for (let i = 0; i < playerCards.length; i++) {
+        allocationBombs[i] = [];
+        // 真实用户不介入发牌
+        if (!players[i].isRobot) {
+          continue;
+        }
+
+        let straightTriplesCount = 0;
+        let triplesCount = 0;
+        let nextStraightTriplesCount = 0;
+        let straightsCount = 0;
+
+        // 机器人先发0-2个炸弹
+        const bombCount = Math.floor(Math.random() * 2);
+        for (let j = 0; j < bombCount; j++) {
+          allocationBombs[i][j] = [];
+          const isJokerBomb = Math.random() < 0.05;
+          const jokerBombCount = newCardTags.filter(c => c > CardTag.dk).length;
+          // console.warn("isJokerBomb-%s, jokerBombCount-%s, status-%s", isJokerBomb, jokerBombCount, isJokerBomb && jokerBombCount === 2);
+
+          // 发放王炸
+          if (isJokerBomb && jokerBombCount === 2) {
+            for (let k = CardTag.bigJoker; k <= CardTag.littleJoker; k++) {
+              const cardIndex = newCardTags.findIndex(c => c === k);
+              if (cardIndex !== -1) {
+                const card = newCardTags[cardIndex];
+                newCardTags.splice(cardIndex, 1);
+                playerCards[i].push(card);
+              }
+            }
+          }
+
+          // 发放其他炸弹
+          const randomIndex = Math.floor(Math.random() * bombs.length);
+
+          for (let k = 0; k < 4; k++) {
+            const cardIndex = newCardTags.findIndex(c => c === bombs[randomIndex] + k * 13);
+            // console.warn("randomIndex-%s, boomCard-%s, card-%s, cardIndex-%s", randomIndex, bombs[randomIndex], bombs[randomIndex] + k * 13, cardIndex);
+            if (cardIndex !== -1) {
+              const card = newCardTags[cardIndex];
+              allocationBombs[i][j].push(card);
+              newCardTags.splice(cardIndex, 1);
+              playerCards[i].push(card);
+            }
+          }
+          bombs.splice(randomIndex, 1);
+        }
+
+        console.warn("index %s allocationBombs %s", i, JSON.stringify(allocationBombs[i]));
+
+        // 根据随机数，给机器人派发1飞机/2两个三张/3顺子(5顺子)
+        const randomNum = Math.random();
+        const randomType = randomNum < 0.3 ? 1 : 2;
+
+        // 发放飞机
+        if (randomType === 1) {
+          const randomIndex = Math.floor(Math.random() * straightTriples.length);
+          for (let k = 0; k < 4; k++) {
+            const cardIndex = newCardTags.findIndex(c => c === straightTriples[randomIndex] + k * 13);
+            if (cardIndex !== -1 && straightTriplesCount < 3) {
+              straightTriplesCount++;
+              const card = newCardTags[cardIndex];
+              newCardTags.splice(cardIndex, 1);
+              playerCards[i].push(card);
+            }
+
+            const nextCardIndex = newCardTags.findIndex(c => c === straightTriples[randomIndex] + 1 + k * 13);
+            if (nextCardIndex !== -1 && nextStraightTriplesCount < 3) {
+              nextStraightTriplesCount++;
+              const card = newCardTags[nextCardIndex];
+              newCardTags.splice(nextCardIndex, 1);
+              playerCards[i].push(card);
+            }
+          }
+          straightTriples.splice(randomIndex, 1);
+        }
+
+        // 发放2个三张
+        if (randomType === 2) {
+          for (let z = 0; z < 2; z++) {
+            const randomIndex = Math.floor(Math.random() * triples.length);
+            for (let k = 0; k < 4; k++) {
+              const cardIndex = newCardTags.findIndex(c => c === triples[randomIndex] + k * 13);
+              if (cardIndex !== -1 && triplesCount < 3) {
+                triplesCount++;
+                const card = newCardTags[cardIndex];
+                newCardTags.splice(cardIndex, 1);
+                playerCards[i].push(card);
+              }
+            }
+            triples.splice(randomIndex, 1);
+          }
+        }
+
+        // 发放顺子
+        // if (randomType === 3) {
+        //   const randomIndex = Math.floor(Math.random() * straights.length);
+        //   for (let k = 0; k < 4; k++) {
+        //     const cardIndex = newCardTags.findIndex(c => c === straights[randomIndex] + k * 13);
+        //     if (cardIndex !== -1 && straightsCount < 1) {
+        //       straightsCount++;
+        //       const card = newCardTags[cardIndex];
+        //       newCardTags.splice(cardIndex, 1);
+        //       playerCards[i].push(card);
+        //     }
+        //   }
+        //   straights.splice(randomIndex, 1);
+        // }
+
+        console.warn("index-%s, playerCards-%s", i, JSON.stringify(playerCards[i]));
+      }
+
+      // 补发剩余牌
+      for (let i = 0; i < playerCards.length; i++) {
+        for (let j = playerCards[i].length; j < this.playerCardCount; j++) {
+          const card = newCardTags.pop();
+          playerCards[i].push(card);
+        }
+      }
+
+      // 判断用户是否有炸弹，飞机，连对，顺子，各取一张牌，和其他用户的单张互换
+      for (let i = 0; i < playerCards.length; i++) {
+        // 机器人不换牌
+        if (players[i].isRobot) {
+          continue;
+        }
+
+        // 判断是否有炸弹
+        let playerChangeCards = [];
+        let changeAllCards = [];
+        for (let k = CardTag.ha; k <= CardTag.hk; k++) {
+          const cardCount = playerCards[i].filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+          if (cardCount === 4) {
+            playerChangeCards.push(k);
+            changeAllCards.push(k);
+          }
+        }
+
+        // 计算飞机
+        for (let k = CardTag.ha; k <= CardTag.hq; k++) {
+          const cardCount = playerCards[i].filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+          const nextCardCount = playerCards[i].filter(c => [k + 1, k + 14, k + 27, k + 40].includes(c)).length;
+          if (cardCount >= 3 && nextCardCount >= 3) {
+            for (let vv = 0; vv < 4; vv++) {
+              const vvCardCount = playerCards[i].filter(c => c === k + vv * 13).length;
+              if (vvCardCount > 0) {
+                playerChangeCards.push(k + vv * 13);
+                changeAllCards.push(k + vv * 13);
+                break;
+              }
+            }
+          }
+        }
+
+        // 计算顺子（换其中的单牌）
+        for (let k = CardTag.ha; k <= CardTag.h9; k++) {
+          const cardCount1 = playerCards[i].filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+          const cardCount2 = playerCards[i].filter(c => [k + 1, k + 14, k + 27, k + 40].includes(c)).length;
+          const cardCount3 = playerCards[i].filter(c => [k + 2, k + 15, k + 28, k + 41].includes(c)).length;
+          const cardCount4 = playerCards[i].filter(c => [k + 3, k + 16, k + 29, k + 42].includes(c)).length;
+          const cardCount5 = playerCards[i].filter(c => [k + 4, k + 17, k + 30, k + 43].includes(c)).length;
+          if (cardCount1 && cardCount2 && cardCount3 && cardCount4 && cardCount5) {
+            for (let n = k; n < k + 5; n++) {
+              const cardCount = playerCards[i].filter(c => [n, n + 13, n + 26, n + 39].includes(c)).length;
+              if (cardCount === 1) {
+                for (let vv = 0; vv < 4; vv++) {
+                  const vvCardCount = playerCards[i].filter(c => c === n + vv * 13).length;
+                  if (vvCardCount > 0) {
+                    playerChangeCards.push(n + vv * 13);
+                    changeAllCards.push(n + vv * 13);
+
+                    console.warn("index %s straights begin %s end %s can change card %s CardCount %s", i, k, k + 4, n, JSON.stringify([cardCount1, cardCount2, cardCount3, cardCount4, cardCount5]));
+                    break;
+                  }
+                }
+
+                break;
+              }
+            }
+          }
+        }
+
+        // 从机器人手中去换牌
+        for (let j = 0; j < playerChangeCards.length; j++) {
+          const bombCard = playerChangeCards[j];
+          const bombCardIndex = playerCards[i].findIndex(c => c === bombCard);
+          for (let x = 0; x < playerCards.length; x++) {
+            if (!players[x].isRobot) {
+              continue;
+            }
+
+            // 计算用户单张对子数量
+            const playerDoubles = [];
+            for (let k = CardTag.ha; k <= CardTag.hk; k++) {
+              if (changeAllCards.includes(k)) {
+                continue;
+              }
+
+              const cardCount = playerCards[x].filter(c => [k, k + 13, k + 26, k + 39].includes(c)).length;
+              if (cardCount <= 2) {
+                playerDoubles.push(k);
+              }
+            }
+
+            const randomIndex = Math.floor(Math.random() * playerDoubles.length);
+            for (let k = 0; k < 4; k++) {
+              const xCardIndex = playerCards[x].findIndex(c => c === playerDoubles[randomIndex] + k * 13);
+              const iCardIndex = playerCards[i].findIndex(c => c === bombCard);
+              if (xCardIndex !== -1 && iCardIndex !== -1) {
+                const card = playerCards[x][xCardIndex];
+                playerCards[x].splice(xCardIndex, 1);
+                playerCards[i].splice(bombCardIndex, 1);
+                playerCards[i].push(card);
+                playerCards[x].push(bombCard);
+                console.warn("changeA index %s card %s cardIndex %s", i, bombCard, bombCardIndex);
+                console.warn("changeB index %s card %s cardIndex %s", x, card, xCardIndex);
+                break;
+              }
+            }
+            playerDoubles.splice(randomIndex, 1);
+            break;
+          }
+        }
+      }
     }
 
     this.remainCardTags = newCardTags;
@@ -113,6 +361,32 @@ export class CardManager {
       } else if (t >= CardTag.bigJoker && t <= CardTag.littleJoker) {
         cards.push(new Card(CardType.Joker, 15 + t - CardTag.bigJoker + 1))
       }
+    }
+    return cards;
+  }
+
+  // 转换成 Card Value
+  getCardValueByType(initCards) {
+    const cards = [[], [], []];
+    for (let i = 0; i < initCards.length; i++) {
+      for (const playerCards of initCards[i]) {
+        if (playerCards.type === CardType.Spades) {
+          cards[i].push(CardTag.sa + playerCards.value - 1);
+        }
+        if (playerCards.type === CardType.Heart) {
+          cards[i].push(CardTag.ha + playerCards.value - 1);
+        }
+        if (playerCards.type === CardType.Club) {
+          cards[i].push(CardTag.ca + playerCards.value - 1);
+        }
+        if (playerCards.type === CardType.Diamond) {
+          cards[i].push(CardTag.da + playerCards.value - 1);
+        }
+        if (playerCards.type === CardType.Joker) {
+          cards[i].push(CardTag.bigJoker + playerCards.value - 16);
+        }
+      }
+
     }
     return cards;
   }

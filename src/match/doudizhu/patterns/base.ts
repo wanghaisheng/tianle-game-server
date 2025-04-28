@@ -30,21 +30,28 @@ export const PatterNames = {
   triples: 'triples_',
   bomb: 'bomb',
   triple: 'triple',
+  // 三张带对子
   triplePlus2: 'triple++',
-  // 3带0，带1
+  // 3带1
   triplePlusX: 'tripleX',
-  // 飞机
+  // 飞机不带
+  straightTriples: 'triples',
+  // 飞机带单张
   straightTriplePlus2: 'triples++_',
+  // 飞机带对子
+  straightTriplePlusX: 'triplesX_',
   // 顺子
   straight: 'straight_',
   // 4带3
   quadPlus3: 'quadruple+++',
   // 4带2
   quadPlus2: 'quadruple++',
+  // 4带2对
+  quadPlusX: 'quadrupleX',
 }
 
 export interface IMatcher {
-  verify (cards: Card[]): IPattern | null
+  verify (cards: Card[], allCards?: Card[]): IPattern | null
   promptWithPattern (target: IPattern, cards: Card[]): Card[][]
 }
 

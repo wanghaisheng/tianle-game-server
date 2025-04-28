@@ -248,6 +248,9 @@ class PlayerState implements Serializable {
   // 是否地胡
   isDiHu: boolean = true;
 
+  // 是否机器人
+  isRobot: boolean = false;
+
   constructor(userSocket, room, rule) {
     this.room = room
     this.zhuang = false
@@ -273,6 +276,7 @@ class PlayerState implements Serializable {
     // 不激活旧的机器人托管
     this.onDeposit = false
     this.ai = userSocket.isRobot() ? basicAi : playerAi
+    this.isRobot = !!userSocket.isRobot();
 
     this.timeoutTask = null
     this.msgHook = {}
@@ -1198,6 +1202,11 @@ class PlayerState implements Serializable {
       const cards = genCardArray(this.cards)
       this.cancelTimeout()
       this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}})
+
+      const daPlayer = this.room.gameState.stateData[Enums.da];
+      if (daPlayer && daPlayer._id.toString() === this._id.toString()) {
+        this.emitter.emit('waitForDa', this.room.gameState.stateData.msg);
+      }
     })
     playerSocket.on('game/refreshQuiet', () => {
       this.emitter.emit('refreshQuiet', playerSocket, this.seatIndex)

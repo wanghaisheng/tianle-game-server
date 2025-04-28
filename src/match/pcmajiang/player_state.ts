@@ -213,6 +213,8 @@ class PlayerState implements Serializable {
   gameScore: 0
   // 鸟牌积分
   feiNiaoCards: []
+  // 是否机器人
+  isRobot: boolean = false;
 
   constructor(userSocket, room, rule) {
     this.room = room
@@ -237,6 +239,7 @@ class PlayerState implements Serializable {
     // 不激活旧的机器人托管
     this.onDeposit = false
     this.ai = userSocket.isRobot() ? basicAi : playerAi
+    this.isRobot = !!userSocket.isRobot();
 
     this.timeoutTask = null
     this.msgHook = {}
@@ -585,7 +588,7 @@ class PlayerState implements Serializable {
     return HuPaiDetect.check(this.cards, this.events, this.rule, this.seatIndex)
   }
 
-  onShuffle(remainCards, caiShen, juShu, cards, seatIndex, juIndex, needShuffle?: boolean) {
+  onShuffle(remainCards, caiShen, juShu, cards, seatIndex, juIndex, needShuffle, zhuangIndex) {
     cards.forEach(x => {
       this.cards[x]++
     })
@@ -594,7 +597,7 @@ class PlayerState implements Serializable {
     this.seatIndex = seatIndex
 
     this.recorder.recordUserEvent(this, 'shuffle')
-    this.sendMessage('game/Shuffle', {ok: true, data: {juShu, cards, caiShen: [caiShen], remainCards, juIndex, needShuffle: !!needShuffle, zhuang: this.zhuang}})
+    this.sendMessage('game/Shuffle', {ok: true, data: {juShu, cards, caiShen: [caiShen], remainCards, juIndex, needShuffle: !!needShuffle, zhuang: zhuangIndex}})
   }
 
   @triggerAfterAction
@@ -946,6 +949,11 @@ class PlayerState implements Serializable {
       const cards = genCardArray(this.cards)
       this.cancelTimeout()
       this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}})
+
+      const daPlayer = this.room.gameState.stateData[Enums.da];
+      if (daPlayer && daPlayer._id.toString() === this._id.toString()) {
+        this.emitter.emit('waitForDa', this.room.gameState.stateData.msg);
+      }
     })
     playerSocket.on('game/refreshQuiet', () => {
       this.emitter.emit('refreshQuiet', playerSocket, this.seatIndex)

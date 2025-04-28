@@ -73,6 +73,7 @@ module.exports = {
     message: true
   },
   game: {
+    dissolveTime: 1000 * 60 * 30,
     helpCount: 5,
     initModelGoldCount: 0,
     luckyDrawNeedGold: 500,
@@ -86,6 +87,7 @@ module.exports = {
     prizeNeedRoomNum: 5,
     fourJokerReward: 880,
     prizeCount: 11,
+    noviceProtection: 1,
     // 动画播放时间 ms
     playShuffleTime: 6000,
     // 一个炸弹计分
@@ -95,13 +97,15 @@ module.exports = {
     // 掉线以后推迟出牌的时间(秒)
     offlineDelayTime: 180,
     // 出牌等待时间(秒)
-    waitDelayTime: 5,
+    waitDelayTime: 2,
     // 等待用户加入金豆房的时间
-    waitRubyPlayer: 0,
+    waitRubyPlayer: 3,
+    // 结算不准备踢出时间
+    waitKickOutTime: 30,
     // 房卡兑换金豆
     gem2RubyExchangeRate: 10000,
     // 是否扣房卡
-    useGem: false,
+    useGem: true,
     // 赢家保留的金豆比例
     winnerReservePrizeRuby: 0.3,
     // 洗牌需要支付的房卡

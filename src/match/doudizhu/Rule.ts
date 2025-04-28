@@ -1,3 +1,5 @@
+import Enums from "./enums";
+
 /**
  * Created by Color on 2016/9/2.
  */
@@ -17,7 +19,7 @@ class Rule {
   }
 
   get test() {
-    return this.ro.test || true
+    return this.ro.test || false
   }
 
   get playerCount() {
@@ -32,25 +34,48 @@ class Rule {
     return this.ro.luckyReward || 0
   }
 
-  // 是否允许4带2
-  get boomPlus2() {
-    return !!this.ro.boomPlus2;
+  // 封顶倍数(完成)
+  get capping() {
+    return this.ro.capping || -1;
   }
 
-  // 3张可以带0, 1张，2张
-  get triplePlusX() {
-    return !!this.ro.triplePlusX;
+  // 是否允许加倍
+  get allowDouble() {
+    return this.ro.allowDouble;
   }
 
+  // 是否允许明牌(完成)
+  get allowOpenCard() {
+    return this.ro.allowOpenCard;
+  }
+
+  // 是否使用记牌器(完成)
+  get useRecorder() {
+    return this.ro.useRecorder;
+  }
+
+  // 是否剩余三张才显示牌数(客户端内容)
+  get remainCard3() {
+    return this.ro.remainCard3;
+  }
+
+  // 双王/4个二必叫(完成)
+  get mustCallLandlord() {
+    return this.ro.mustCallLandlord;
+  }
 
   // 炸弹是否计分
   get countBoomScore() {
     return !!this.ro.countBoomScore
   }
 
-  // 是否赢家先出
-  get winnerFirst() {
-    return !!this.ro.winnerFirst
+  // 币种
+  get currency(): string {
+    if (!this.ro.currency) {
+      return Enums.goldCurrency;
+    }
+
+    return this.ro.currency;
   }
 }
 

@@ -3,7 +3,7 @@ import {groupBy, IMatcher, IPattern, lengthFirstThenPointGroupComparator, Patter
 
 export default class SingleMatcher implements IMatcher {
   name: string = PatterNames.single;
-  verify(cards: Card[]): IPattern | null {
+  verify(cards: Card[], allCards: Card[] = []): IPattern | null {
     if (cards.length === 1) {
       return {
         name: this.name,
@@ -18,8 +18,23 @@ export default class SingleMatcher implements IMatcher {
     if (target.name !== this.name) {
       return [];
     }
-    return groupBy(cards.filter(c => c.point > target.score), card => card.point)
+    const singleCards = groupBy(cards.filter(c => c.point > target.score), card => card.point)
+      .filter(grp => grp.length > 0 && grp.length < 4)
       .sort(lengthFirstThenPointGroupComparator)
-      .map(grp => [grp[0]])
+      .map(grp => [grp[0]]);
+
+    // 如果有王炸， 过滤王炸
+    const jokerCount = singleCards.filter(c => c[0].point === 16 || c[0].point === 17).length;
+    // console.warn("singleCards %s jokerCount %s", JSON.stringify(singleCards), jokerCount);
+    if (jokerCount === 2) {
+      const littleJokerIndex = singleCards.findIndex(c => c[0].point === 16);
+      singleCards.splice(littleJokerIndex, 1);
+      const bigJokerIndex = singleCards.findIndex(c => c[0].point === 17);
+      singleCards.splice(bigJokerIndex, 1);
+
+      // console.warn("littleJokerIndex %s, bigJokerIndex %s singleCards %s", littleJokerIndex, bigJokerIndex, JSON.stringify(singleCards));
+    }
+
+    return singleCards;
   }
 }

@@ -32,7 +32,7 @@ export class PlayerRmqProxy extends EventEmitter implements SimplePlayer {
   constructor(model, channel, readonly gameName: GameTypes | string) {
     super()
     this.model = model
-    this.ip = model.ip;
+    this.ip = model && model.ip ? model.ip : "127.0.0.1";
     this.channel = channel
     this.myQueue = `user:${this._id}`
     this.myRouteKey = `user.${this._id}.${this.gameName}`
@@ -52,7 +52,7 @@ export class PlayerRmqProxy extends EventEmitter implements SimplePlayer {
 
   sendMessage(name: 'room/join-success', message: { _id: string, rule: any });
   sendMessage(name: 'room/joinReply', message: { ok: boolean, info: string });
-  sendMessage(name: 'room/leaveReply', message: { _id: string });
+  sendMessage(name: 'room/leaveReply', message: { playerId: string });
   sendMessage(name: 'room/reconnectReply', message: {ok: boolean, data: {_id: string, rule: any}});
   sendMessage(name: never | string, message: any);
 
@@ -71,7 +71,7 @@ export class PlayerRmqProxy extends EventEmitter implements SimplePlayer {
       let g = this.model.gold;
       g += v;
       this.model.gold = g;
-      this.sendMessage('resource/update', {ok: true, data: {gold: g, diamond: this.model.diamond, tlGold: this.model.tlGold}})
+      this.sendMessage('resource/update', {ok: true, data: {gold: g, diamond: this.model.diamond, tlGold: this.model.tlGold, redPocket: this.model.redPocket}})
       PlayerModel.update({_id: this.model._id}, {$set: {gold: g}}, err => {
           if (err) {
             console.error(err);

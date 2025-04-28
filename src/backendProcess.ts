@@ -14,6 +14,8 @@ import createClient from "./utils/redis";
 import {GameType, TianleErrorCode} from "@fm/common/constants";
 import GameCategory from "./database/models/gameCategory";
 import PlayerCardTable from "./database/models/PlayerCardTable";
+import ClubMember from "./database/models/clubMember";
+import {requestToAllClubMember} from "./player/message-handlers-rmq/club";
 
 const alwaysOk = () => true
 
@@ -63,6 +65,17 @@ export class BackendProcess {
     await this.lobbyChannel.assertExchange('exClubCenter', 'topic', {durable: false})
     await this.lobbyChannel.assertExchange('userCenter', 'topic', {durable: false})
 
+    this.lobby.clubBroadcaster = {
+      broadcast: async (clubId: string) => {
+        await requestToAllClubMember(this.lobbyChannel, 'newClubRoomCreated', clubId, this.gameName, {});
+      },
+
+      updateClubRoomInfo: async (clubId: string, roomInfo: {}) => {
+        await requestToAllClubMember(this.lobbyChannel, 'club/updateClubRoom', clubId, this.gameName, {ok: true, data: roomInfo});
+      }
+
+    }
+
     const roomIds: string[] = await this.getRoomIdsToRecover();
 
     // 还原掉线房间
@@ -74,17 +87,21 @@ export class BackendProcess {
 
       const unfinishedRoomId = await service.roomRegister.getDisconnectedRoom(messageBody.from, this.gameName);
       if (unfinishedRoomId) {
-        return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomIsNotFinish}, playerRouteKey);
+        return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomIsNotFinish, data: {roomId: unfinishedRoomId, gameName: this.gameName}}, playerRouteKey);
       }
 
       const playerModel = await service.playerService.getPlayerPlainModel(messageBody.from)
       if (playerModel) {
         const alreadyInRoom = await service.roomRegister.roomNumber(playerModel._id, this.gameName)
         if (alreadyInRoom) {
-          return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomIsNotFinish}, playerRouteKey);
+          return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomIsNotFinish, data: {roomId: alreadyInRoom, gameName: this.gameName}}, playerRouteKey);
         }
 
-        if (messageBody.payload.rule.isPublic) {
+        if (messageBody.payload.clubId) {
+          const clubMember = await ClubMember.findOne({club: messageBody.payload.clubId, member: playerModel._id});
+          playerModel.clubGold = clubMember.clubGold;
+          await this.createPrivateClubRoom(playerModel, messageBody, messageBody.payload.clubId);
+        } else if (messageBody.payload.rule.isPublic) {
           await this.joinPublicRoom(playerModel, messageBody);
         } else {
           await this.createPrivateRoom(playerModel, messageBody)
@@ -107,10 +124,10 @@ export class BackendProcess {
           await this.redisClient.delAsync('room:info:' + roomId)
           await this.redisClient.delAsync(`room:${roomId}`)
           await this.redisClient.sremAsync(`room`, roomId)
-          this.sendMessage('sc/showInfo', {reason: `${roomId} 信息已清除`}, playerRouteKey);
+          this.sendMessage('sc/showInfo', {ok: true, data: {}}, playerRouteKey);
 
         } catch (e) {
-          this.sendMessage('sc/showInfo', {reason: `${roomId} 信息清除失败`}, playerRouteKey);
+          this.sendMessage('sc/showInfo', {ok: false, info: TianleErrorCode.clearRoomInfoFailed}, playerRouteKey);
           logger.error(`del room ${roomId} failed with `, e)
         }
       }
@@ -143,10 +160,86 @@ export class BackendProcess {
           }, this.gameName, this.roomRecover)
 
           this.lobby.listenRoom(roomProxy.room)
+          if (roomProxy.room.clubMode) {
+            this.lobby.listenClubRoom(roomProxy.room)
+          }
         }
       } catch (e) {
         logger.error('room recover failed', id, e)
       }
+    }
+  }
+
+  async createPrivateClubRoom(playerModel, messageBody, clubId) {
+    const playerRouteKey = `user.${messageBody.from}.${this.gameName}`;
+
+    const clubOwner = await this.lobby.getClubOwner(clubId);
+    if (!clubOwner) {
+      return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.clubNotExists}, playerRouteKey);
+    }
+
+    const clubOwnerSocket = new PlayerRmqProxy(clubOwner, this.lobbyChannel, this.gameName);
+
+    if (clubOwner.diamond < await this.lobby.roomFee(messageBody.payload.rule)) {
+      return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.notJoinClubGame}, playerRouteKey);
+    }
+
+    const roomId = await this.redisClient.lpopAsync('roomIds');
+    if (!roomId) {
+      return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomInvalid}, playerRouteKey);
+    }
+
+    const rule = await this.lobby.normalizeRule(messageBody.payload.rule);
+    const room = await this.lobby.createClubRoom(false, Number(roomId), rule, clubId, clubOwnerSocket);
+    room.ownerId = messageBody.from;
+
+    try {
+      const gameChannel = await this.connection.createChannel();
+      const roomQueueReply = await gameChannel.assertQueue(`${this.gameName}.${room._id}`, {
+        durable: false,
+        autoDelete: true
+      })
+      await gameChannel.bindQueue(roomQueueReply.queue, 'exGameCenter', `${this.gameName}.${room._id}`)
+
+      const roomProxy = new RoomProxy(room,
+        {
+          redisClient: this.redisClient, gameChannel, gameQueue: roomQueueReply,
+          cluster: this.cluster
+        }, this.gameName)
+
+      const theCreator = new PlayerRmqProxy(
+        {...playerModel, _id: messageBody.from, ip: messageBody.ip},
+        gameChannel,
+        this.gameName
+      )
+
+      const category = await GameCategory.findOne({_id: room.rule.ro.categoryId}).lean();
+      let cardTableId = -1;
+
+      // 获取用户称号
+      const playerCardTable = await PlayerCardTable.findOne({playerId: playerModel._id, isUse: true});
+      if (playerCardTable && (playerCardTable.times === -1 || playerCardTable.times > new Date().getTime())) {
+        cardTableId = playerCardTable.propId;
+      }
+
+      theCreator.sendMessage('room/createReply', {ok: true, data: {roomType: "club", _id: room._id, rule: room.rule, category, cardTableId}})
+
+      if (room.rule.ro.gameType === GameType.xmmj) {
+        room.fanShuMap[theCreator._id] = 16;
+      }
+
+      await roomProxy.joinAsCreator(theCreator);
+      await saveRoomInfo(room._id, messageBody.payload.gameType, room.clubId);
+      await saveRoomDetail(room._id, JSON.stringify(room.toJSON()));
+      await service.roomRegister.saveNewRoomRecord(room, messageBody.payload.gameType, playerModel, rule);
+      await this.redisClient.saddAsync('room', room._id);
+      await service.roomRegister.putPlayerInGameRoom(messageBody.from, this.gameName, room._id, room.rule.ro.playerCount);
+      await this.redisClient.saddAsync(`cluster-${this.cluster}`, room._id);
+      await this.redisClient.setAsync('room:info:' + room._id, JSON.stringify(room.toJSON()));
+
+      // await requestToAllClubMember(gameChannel, 'newClubRoomCreated', clubId, this.gameName, {});
+    } catch (e) {
+      logger.error('create room error', e)
     }
   }
 
@@ -161,15 +254,15 @@ export class BackendProcess {
     // 创建规则(红包规则等)
     const rule = await this.lobby.normalizeRule(messageBody.payload.rule)
     // 局数设为 99
-    rule.juShu = -1;
-    const room = await this.lobby.getAvailablePublicRoom(messageBody.from, Number(roomId), rule);
+    // rule.juShu = -1;
+    const room = await this.lobby.getAvailablePublicRoom(messageBody.from, Number(roomId), rule, playerModel);
 
     // 检查金豆
     const resp = await this.lobby.isRoomLevelCorrect(playerModel, rule);
-    if (resp.isMoreRuby) {
+    if (resp.isMoreRuby && room.rule.ro.gameType !== GameType.redpocket) {
       return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.goldInsufficient}, playerRouteKey);
     }
-    if (resp.isUpper) {
+    if (resp.isUpper && room.rule.ro.gameType !== GameType.redpocket) {
       return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.goldIsHigh}, playerRouteKey);
     }
 
@@ -201,18 +294,17 @@ export class BackendProcess {
         cardTableId = playerCardTable.propId;
       }
 
-      await playerRmqProxy.sendMessage('room/createReply', {ok: true, data: {_id: room._id, rule: room.rule, category, cardTableId}})
-      // if (room.ownerId.toString() === playerRmqProxy._id.toString()) {
-      //   await roomProxy.joinAsCreator(playerRmqProxy)
-      // } else {
-      //   await room.join(playerRmqProxy);
-      // }
+      await playerRmqProxy.sendMessage('room/createReply', {ok: true, data: {roomType: "public", _id: room._id, rule: room.rule, category, cardTableId}})
 
       if (room.rule.ro.gameType === GameType.xmmj) {
         room.fanShuMap[playerRmqProxy._id] = 16;
       }
 
-      await roomProxy.joinAsCreator(playerRmqProxy);
+      if (room.ownerId.toString() === playerRmqProxy._id.toString()) {
+        await roomProxy.joinAsCreator(playerRmqProxy);
+      } else {
+        await room.join(playerRmqProxy);
+      }
 
       // 第一次进房间,保存信息
       await saveRoomInfo(room._id, messageBody.payload.gameType, room.clubId);
@@ -232,20 +324,10 @@ export class BackendProcess {
 
     // 创建规则(红包规则等)
     const rule = await this.lobby.normalizeRule(messageBody.payload.rule)
-    // 局数设为 99
-    // rule.juShu = 99;
-    // 检查金豆
-    // const resp = await this.lobby.isRoomLevelCorrect(playerModel, rule.categoryId);
-    // if (resp.isMoreRuby) {
-    //   return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.goldInsufficient}, playerRouteKey);
-    // }
-    // if (resp.isUpper) {
-    //   return this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.goldIsHigh}, playerRouteKey);
-    // }
 
     const roomId = await this.redisClient.lpopAsync('roomIds')
     if (!roomId) {
-      this.sendMessage('room/createReply', {reason: `服务器错误,无法创建房间 [-9]`}, playerRouteKey);
+      this.sendMessage('room/createReply', {ok: false, info: TianleErrorCode.roomInvalid}, playerRouteKey);
       return
     }
 
@@ -283,7 +365,7 @@ export class BackendProcess {
         cardTableId = playerCardTable.propId;
       }
 
-      await theCreator.sendMessage('room/createReply', {ok: true, data: {_id: room._id, rule: room.rule, cardTableId}})
+      await theCreator.sendMessage('room/createReply', {ok: true, data: {roomType: "person", _id: room._id, rule: room.rule, cardTableId}})
 
       // 创建者即庄家，设置底分16分
       if (room.rule.ro.gameType === GameType.xmmj) {
@@ -350,7 +432,6 @@ export class BackendProcessBuilder {
   }
 
   build(): BackendProcess {
-
     const process = new BackendProcess({
       dataBaseUrl: this.dataBaseUrl,
       rabbitMqServer: this.rabbitMqServer,

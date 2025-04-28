@@ -155,7 +155,7 @@ export default class RoomProxy {
           const alreadyInRoom = await service.roomRegister.roomNumber(messageBody.from, gameName)
 
           if (alreadyInRoom && alreadyInRoom !== room._id) {
-            newPlayer.sendMessage('room/joinReply', {ok: false, info: TianleErrorCode.userNotFound})
+            newPlayer.sendMessage('room/joinReply', {ok: false, info: TianleErrorCode.roomIsNotFinish})
             return
           }
 
@@ -205,6 +205,11 @@ export default class RoomProxy {
           return
         }
 
+        if (messageBody.name === 'game/testFaPai') {
+          await room.testFaPai(thePlayer);
+          return
+        }
+
         if (messageBody.name === 'room/shuffleDataApply') {
           await room.shuffleDataApply(messageBody.payload)
           return
@@ -232,7 +237,7 @@ export default class RoomProxy {
           if (room.leave(thePlayer)) {
             await service.roomRegister.removePlayerFromGameRoom(messageBody.from, gameName, room._id)
 
-            thePlayer.sendMessage('room/leaveReply', {ok: true, data: {playerId: thePlayer._id, roomId: this.room._id}})
+            thePlayer.sendMessage('room/leaveReply', {ok: true, data: {playerId: thePlayer._id, roomId: this.room._id, location: "roomRmqProxy"}})
             await this.tryBestStore(rabbit.redisClient, room)
             return
           }
@@ -423,8 +428,8 @@ export default class RoomProxy {
   }
 
   async joinAsCreator(theCreator: PlayerRmqProxy) {
-    await this.room.join(theCreator)
-    this.room.creator = theCreator
+    await this.room.join(theCreator);
+    this.room.creator = theCreator;
     this.room.creatorName = theCreator.model.nickname;
   }
 }

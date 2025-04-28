@@ -1,4 +1,13 @@
-import {ConsumeLogType, GlobalConfigKeys, TianleErrorCode, shopPropType, playerAttributes} from "@fm/common/constants";
+import {
+  ConsumeLogType,
+  GlobalConfigKeys,
+  TianleErrorCode,
+  shopPropType,
+  playerAttributes,
+  GameType
+} from "@fm/common/constants";
+import * as path from "path";
+import * as config from "../../config";
 import {addApi} from "../../common/api";
 import {service} from "../../service/importService";
 import {BaseApi} from "./baseApi";
@@ -6,6 +15,14 @@ import RoomGoldRecord from "../../database/models/roomGoldRecord";
 import GameFeedback from "../../database/models/GameFeedback";
 import Enums from "../../match/majiang/enums";
 import LuckyBless from "../../database/models/luckyBless";
+import WithdrawConfig from "../../database/models/withdrawConfig";
+import roomRecord from "../../database/models/roomRecord";
+import WithdrawRecord from "../../database/models/withdrawRecord";
+import {createLock, withLock} from "../../utils/lock";
+import Player from "../../database/models/player";
+import {batches_transfer} from "../../wechatPay/batches_transfer";
+
+const locker = createLock()
 
 // 游戏
 export class GameApi extends BaseApi {
@@ -67,7 +84,11 @@ export class GameApi extends BaseApi {
   // 战绩
   @addApi()
   async getRecordList(message) {
-    const records = await RoomGoldRecord.where({roomId: message.roomId}).find();
+    let params = {roomId: message.roomId};
+    if (message.juIndex) {
+      params["juIndex"] = message.juIndex;
+    }
+    const records = await RoomGoldRecord.where(params).find().sort({createAt: -1});
     const scoreRecords = [];
     let totalGold = 0;
 
@@ -87,7 +108,7 @@ export class GameApi extends BaseApi {
 
       if (records[i].failList.includes(this.player._id)) {
         const index = records[i].failList.findIndex(p => p === this.player._id);
-        totalGold -= records[i].failGoldList[index];
+        totalGold += records[i].failGoldList[index];
         scoreRecords.push({
           playerId: this.player._id,
           gold: records[i].failGoldList[index],
@@ -232,5 +253,211 @@ export class GameApi extends BaseApi {
   async enterQian() {
     const resp = await service.qian.qianList(this.player);
     this.replySuccess(resp);
+  }
+
+  // 红包麻将看广告免输
+  @addApi({
+    rule: {
+      roomId: "number", // 房间号
+    }
+  })
+  async watchAdverRestoreRedPocket(msg) {
+    const record = await service.playerService.getLastRedPocketRoom(this.player._id, msg.roomId);
+    const player = await service.playerService.getPlayerModel(this.player._id);
+
+    if (!record) {
+      return this.replyFail(TianleErrorCode.recordNotFound);
+    }
+    if (record.redPocket > 0) {
+      return this.replyFail(TianleErrorCode.playerIsWinner);
+    }
+
+    // 挽回红包损失
+    player.redPocket = (player.redPocket + Math.abs(record.redPocket)).toFixed(2);
+    await player.save();
+    await this.player.updateResource2Client();
+    this.replySuccess({redPocket: Math.abs(record.redPocket)})
+  }
+
+  // 红包麻将看广告红包翻10倍
+  @addApi({
+    rule: {
+      roomId: "number", // 房间号
+      multiple: "number", // 倍数
+    }
+  })
+  async watchAdverMultipleRedPocket(msg) {
+    const record = await service.playerService.getLastRedPocketRoom(this.player._id, msg.roomId);
+    const player = await service.playerService.getPlayerModel(this.player._id);
+
+    if (!record) {
+      return this.replyFail(TianleErrorCode.recordNotFound);
+    }
+    if (record.redPocket < 0) {
+      return this.replyFail(TianleErrorCode.playerIsLoser);
+    }
+    if (record.multiple) {
+      return this.replyFail(TianleErrorCode.gameIsMultiple);
+    }
+    if (record.receive) {
+      return this.replyFail(TianleErrorCode.prizeIsReceive);
+    }
+
+    // 修改翻倍状态
+    record.multiple = true;
+    record.receive = true;
+    record.redPocket *= msg.multiple;
+    await record.save();
+
+    // 挽回红包损失
+    player.redPocket = (player.redPocket + record.redPocket).toFixed(2);
+    await player.save();
+    await this.player.updateResource2Client();
+
+    this.replySuccess({redPocket: Math.abs(record.redPocket), multiple: msg.multiple});
+  }
+
+  // 红包麻将看广告额外领最多50元红包
+  @addApi({
+    rule: {
+      roomId: "number", // 房间号
+    }
+  })
+  async watchAdveraAditionalMultipleRedPocket(msg) {
+    const record = await service.playerService.getLastRedPocketRoom(this.player._id, msg.roomId);
+    const player = await service.playerService.getPlayerModel(this.player._id);
+
+    if (!record) {
+      return this.replyFail(TianleErrorCode.recordNotFound);
+    }
+    if (record.additional) {
+      return this.replyFail(TianleErrorCode.gameIsMultiple);
+    }
+
+    // 修改翻倍状态
+    record.additional = true;
+    record.redPocket = record.multiple ? record.redPocket :  record.redPocket * 10;
+    await record.save();
+
+    // 挽回红包损失
+    player.redPocket = (player.redPocket + Math.abs(record.redPocket)).toFixed(2);
+    await player.save();
+    await this.player.updateResource2Client();
+
+    this.replySuccess({redPocket: Math.abs(record.redPocket), multiple: msg.multiple});
+  }
+
+  // 红包麻将数据接口
+  @addApi({})
+  async redPocketData() {
+    const player = await service.playerService.getPlayerModel(this.player._id);
+    const joinRoomCount = await roomRecord.count({creatorId: player.shortId, category: GameType.redpocket});
+    const configs = await WithdrawConfig.find({}).lean();
+    const configList = [];
+
+    for (let i = 0; i < configs.length; i++) {
+      const config = configs[i];
+      if (config.juShu > 0) {
+        config.joinRoomCount = joinRoomCount;
+      }
+
+      // 提现次数
+      config.withdrawCount = await WithdrawRecord.count({playerId: this.player._id, configId: config._id, status: 1});
+
+      if (config.type === 1) {
+        configList.push(config);
+      }
+
+      if (config.type === 2 && joinRoomCount <= 1 && config.first) {
+        configList.push(config);
+      }
+
+      if (config.type === 2 && joinRoomCount > 1 && !config.first) {
+        configList.push(config);
+      }
+    }
+
+    this.replySuccess({first: joinRoomCount <= 1, redPocket: player.redPocket, configs: configList});
+  }
+
+  // 红包提现
+  @addApi()
+  async withdrawRedPocket(message) {
+    await withLock('red-pocket-withdraw', 7000, async () => {
+      const playerModel = await Player.findById(this.player._id);
+
+      if (playerModel && !playerModel.openid) {
+        return this.replyFail(TianleErrorCode.playerIsTourist);
+      }
+
+      const withdrawConfig = await WithdrawConfig.findOne({_id: message.configId});
+
+      if (playerModel.redPocket < withdrawConfig.amount) {
+        return this.replyFail(TianleErrorCode.redPocketInsufficient);
+      }
+
+      const record = await WithdrawRecord.create({
+        playerId: playerModel._id,
+        configId: withdrawConfig._id,
+        config: withdrawConfig,
+        sn: await this.service.utils.generateOrderNumber()
+      })
+
+      let tem_batch_no = record._id.toString().concat("12345678");
+      const wechatPayMent = new batches_transfer({
+        mchId: config.wx.mchId,
+        appId: config.wx.app_id,
+        key: config.wx.sign_key,
+        serial_no: config.wx.serial_no,
+        certFilePath: path.join(__dirname, "..", "..", "..", "apiclient_cert.pem"),
+        keyFilePath: path.join(__dirname, "..", "..", "..", "apiclient_key.pem")
+      });
+      const tranRes = await wechatPayMent.batches_transfer({
+        out_bill_no: tem_batch_no,
+        transfer_scene_id: '1000',
+        openid: playerModel.openid,
+        transfer_amount: withdrawConfig.amount * 100,
+        transfer_remark: '天乐麻将红包提现',
+        transfer_scene_report_infos : [
+          {
+            info_type: "活动名称",
+            info_content: "对局有礼"
+          },
+          {
+            info_type: "奖励说明",
+            info_content: "对局可以获得现金红包"
+          }
+        ]
+      });
+
+      console.warn("res-%s", JSON.stringify(tranRes));
+
+      if (tranRes["status"] == '200') {
+        await Player.findByIdAndUpdate(this.player._id, {$inc: {redPocket: -withdrawConfig.amount}}, {'new': true})
+        record.info = tranRes["data"]["state"];
+        record.paymentId = tranRes["data"]["transfer_bill_no"];
+        await record.save();
+        return this.replySuccess({record, response: tranRes});
+      }
+
+      record.info = tranRes["data"]["state"];
+      await record.save();
+      return this.replyFail(TianleErrorCode.withdrawFail);
+    }, locker)
+  }
+
+  // 提现成功回调
+  @addApi({})
+  async withdrawNotify(msg) {
+    const record = await WithdrawRecord.findOne({_id: msg._id});
+    if (!record) {
+      return this.replyFail(TianleErrorCode.recordNotFound);
+    }
+
+    record.status = 1;
+    record.info = "提现成功";
+    await record.save();
+
+    this.replySuccess({});
   }
 }

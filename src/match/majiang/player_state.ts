@@ -255,6 +255,9 @@ class PlayerState implements Serializable {
   // 是否待摸牌状态
   waitMo: boolean = false;
 
+  // 是否机器人
+  isRobot: boolean = false;
+
   constructor(userSocket, room, rule) {
     this.room = room
     this.zhuang = false
@@ -280,6 +283,7 @@ class PlayerState implements Serializable {
     // 不激活旧的机器人托管
     this.onDeposit = false
     this.ai = userSocket.isRobot() ? basicAi : playerAi
+    this.isRobot = !!userSocket.isRobot();
 
     this.timeoutTask = null
     this.msgHook = {}
@@ -1198,6 +1202,11 @@ class PlayerState implements Serializable {
       const cards = genCardArray(this.cards)
       this.cancelTimeout()
       this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}})
+
+      const daPlayer = this.room.gameState.stateData[Enums.da];
+      if (daPlayer && daPlayer._id.toString() === this._id.toString()) {
+        this.emitter.emit('waitForDa', this.room.gameState.stateData.msg);
+      }
     })
     playerSocket.on('game/refreshQuiet', () => {
       this.emitter.emit('refreshQuiet', playerSocket, this.seatIndex)
@@ -1364,10 +1373,12 @@ class PlayerState implements Serializable {
     }
 
     this.events.huCards = this.huCards.slice();
+    this.cards['caiShen'] = this.caiShen;
 
     return {
       index,
       cards,
+      openCard: this.isMingCard,
       tingPai: this.tingPai,
       locked: this.locked,
       dropped: this.dropped,
@@ -1386,10 +1397,20 @@ class PlayerState implements Serializable {
 
   genOppoStates(index) {
     const cardCount = HuPaiDetect.remain(this.cards);
+    const cards = []
+    for (let i = 0; i < this.cards.length; i++) {
+      const c = this.cards[i]
+      for (let j = 0; j < c; j++) {
+        cards.push(i)
+      }
+    }
     this.events.huCards = this.huCards.slice();
-    return {
+    this.cards['caiShen'] = this.caiShen;
+
+    const info = {
       index,
       cardCount,
+      openCard: this.isMingCard,
       tingPai: this.tingPai,
       locked: this.locked,
       huCards: this.huCards,
@@ -1404,6 +1425,12 @@ class PlayerState implements Serializable {
       rule: this.rule,
       room: this.room._id
     }
+
+    if (this.isMingCard) {
+      info["cards"] = cards;
+    }
+
+    return info;
   }
 
   isHu() {

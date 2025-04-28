@@ -1,26 +1,21 @@
+// @ts-ignore
 import {pick, remove} from 'lodash'
 import * as winston from 'winston'
 import PlayerModel from "../../database/models/player";
-import PlayerHelpDetail from "../../database/models/playerHelpModel";
-import RateRecordModel from "../../database/models/rateRecord";
 import {RedPocketRecordModel} from "../../database/models/redPocketRecord";
-import TreasureBox from "../../database/models/treasureBox";
 import GameRecorder from '../../match/GameRecorder'
 import {service} from "../../service/importService";
-import algorithm from "../../utils/algorithm";
 import alg from "../../utils/algorithm";
 import {eqlModelId} from "../modelId"
 import {autoSerialize, autoSerializePropertyKeys, Serializable, serialize, serializeHelp} from "../serializeDecorator"
 import Card, {CardType} from "./card"
 import {manager} from "./cardManager";
-import Enums from "./enums";
 import {
   findFullMatchedPattern,
   findMatchedPatternByPattern,
   firstPlayCard,
   isGreaterThanPattern,
   isGreaterThanPatternForPlainCards,
-  publicRoomFirstPlayCard
 } from "./patterns"
 import {groupBy, IPattern, PatterNames, patternCompare} from "./patterns/base"
 import BombMatcher from './patterns/BombMatcher'
@@ -28,11 +23,12 @@ import TriplePlusXMatcher from "./patterns/TriplePlusXMatcher"
 import PlayerState from './player_state'
 import Room from './room'
 import Rule from './Rule'
-
-const logger = new winston.Logger({
-  level: 'debug',
-  transports: [new winston.transports.Console()]
-})
+import {RobotStep, shopPropType, TianleErrorCode} from "@fm/common/constants";
+import GoodsProp from "../../database/models/GoodsProp";
+import PlayerProp from "../../database/models/PlayerProp";
+import Enums from "./enums";
+import * as config from "../../config"
+import RoomTimeRecord from "../../database/models/roomTimeRecord";
 
 const stateWaitCommit = 'stateWaitCommit'
 const stateGameOver = 'stateGameOver'
@@ -49,15 +45,15 @@ export const genFullyCards = (useJoker: boolean = true) => {
 
   types.forEach((type: CardType) => {
     for (let v = 1; v <= 13; v += 1) {
-      cards.push(new Card(type, v), new Card(type, v))
+      cards.push(new Card(type, v), new Card(type, v));
     }
   })
 
   if (useJoker) {
-    cards.push(new Card(CardType.Joker, 16), new Card(CardType.Joker, 16))
-    cards.push(new Card(CardType.Joker, 17), new Card(CardType.Joker, 17))
+    cards.push(new Card(CardType.Joker, 16), new Card(CardType.Joker, 16));
+    cards.push(new Card(CardType.Joker, 17), new Card(CardType.Joker, 17));
   }
-  return cards
+  return cards;
 }
 
 class Status {
@@ -92,8 +88,8 @@ export function cardChangeDebugger<T extends new (...args: any[]) => {
     changePlayerCards(player, cards) {
       const tempCards = cards.map(card => Card.from(card))
       player.cards = tempCards
-      this.room.broadcast('game/changeCards', {index: player.seatIndex, cards: tempCards})
-      player.sendMessage('game/changePlayerCardsReply', {ok: true, info: '换牌成功！'})
+      this.room.broadcast('game/changeCards', {ok: true, data: {index: player.seatIndex, cards: tempCards}})
+      player.sendMessage('game/changePlayerCardsReply', {ok: true, data: {}})
     }
   }
 }
@@ -160,6 +156,12 @@ abstract class Table implements Serializable {
   bombScorer: (bomb: IPattern) => number
   private autoCommitTimer: NodeJS.Timer
 
+  // 等待复活人数
+  waitRechargeCount: number = 0;
+
+  // 已经复活人数
+  alreadyRechargeCount: number = 0;
+
   constructor(room, rule, restJushu) {
     this.restJushu = restJushu
     this.rule = rule
@@ -224,7 +226,7 @@ abstract class Table implements Serializable {
 
   abstract name()
 
-  abstract async start()
+  abstract async start(payload)
 
   abstract autoModeTimeFunc()
 
@@ -243,12 +245,11 @@ abstract class Table implements Serializable {
   }
 
   public setFirstDa(startPlayerIndex: number) {
-    // console.log('set first da', startPlayerIndex);
     this.status.current.seatIndex = startPlayerIndex
   }
 
   initCards() {
-    this.cards = genFullyCards(this.rule.useJoker)
+    this.cards = genFullyCards(this.rule.useJoker);
     if (this.rule.jokerCount === 6) {
       const canReplaceIndex = [];
       let allIndex = 0;
@@ -260,320 +261,63 @@ abstract class Table implements Serializable {
         allIndex++;
       })
 
-      alg.shuffleForZhadan(canReplaceIndex)
+      alg.shuffleForZhadan(canReplaceIndex);
       this.cards[canReplaceIndex.shift()] = new Card(CardType.Joker, 16);
       this.cards[canReplaceIndex.shift()] = new Card(CardType.Joker, 17);
     }
 
-    this.remainCards = this.cards.length
+    this.remainCards = this.cards.length;
   }
 
   shuffle() {
-    alg.shuffleForZhadan(this.cards)
-    this.turn = 1
-    this.remainCards = this.cards.length
+    alg.shuffleForZhadan(this.cards);
+    this.turn = 1;
+    this.remainCards = this.cards.length;
   }
 
-  consumeCard() {
-    const cardIndex = --this.remainCards
-    return this.cards[cardIndex]
+  consumeCard(helpCard) {
+    let cardIndex = --this.remainCards;
+    if (helpCard) {
+      const index = this.cards.findIndex(c => c.type === helpCard.type && c.value === helpCard.value);
+      if (index !== -1) {
+        cardIndex = index;
+      }
+    }
+
+    const card = this.cards[cardIndex];
+    this.cards.splice(cardIndex, 1);
+    // console.warn("cardCount %s remainCard %s card %s", this.cards.length, cardIndex, JSON.stringify(card));
+    return card;
   }
 
-  takeQuarterCards(p) {
-    const cards = []
-    for (let i = p.cards.length; i < this.getQuarterCount(); i++) {
-      cards.push(this.consumeCard());
+  takeQuarterCards(p, helpCards) {
+    const cards = [];
+    const helpCardCount = helpCards.length;
+    for (let i = 0; i < this.getQuarterCount(); i++) {
+      cards.push(this.consumeCard(i < helpCardCount ? helpCards[i] : null));
     }
     return cards;
   }
 
   getQuarterCount() {
-    return this.rule.useJoker ? 27 : 26;
+    return this.rule.jokerCount ? 27 : 26;
   }
 
-  async executeShuffle(): Promise<void> {
-    await this.helpPlayers();
+  private haveFourJokers(p: PlayerState) {
+    return p.cards.filter(c => c.type === CardType.Joker).length >= 4
   }
 
-  async helpPlayers(): Promise<void> {
-    const tasks = this.players.map((p: any) => {
-      return this.checkPlayerHelper(p);
-    });
-
-    await Promise.all(tasks);
+  private rollReshuffle() {
+    return Math.random() < 0.83
   }
 
-  async checkPlayerHelper(p): Promise<void> {
-    const player = await PlayerModel.findOne({_id: p._id}).lean();
-
-    const helpInfo = await PlayerHelpDetail.findOne({
-      player: p._id,
-      isHelp: 1,
-      $and: [
-        {
-          type: {$in: [1, 2]},
-        },
-        {
-          $or: [
-            {type: 2, game: "zhadan"},
-            {type: 1},
-          ],
-        },
-      ],
-    }).sort({estimateLevel: -1, type: -1}).lean();
-    if (!helpInfo) return;
-
-    if (!this.room.gameState.isHelp) {
-      const PlayerHelpRank = 1 / helpInfo.juCount;
-      const randWithSeed = algorithm.randomBySeed();
-
-      if (randWithSeed > PlayerHelpRank && helpInfo.juCount > helpInfo.count) {
-        await PlayerHelpDetail.findByIdAndUpdate(helpInfo._id, {juCount: helpInfo.juCount - 1});
-        return;
-      }
-
-      logger.info(`${new Date()}：${player.shortId}救助概率${PlayerHelpRank},随机种子概率：${randWithSeed}`);
-      logger.info(`${new Date()}：${player.shortId}补助${helpInfo.estimateLevel}星`)
-      this.room.gameState.isHelp = true;
-      await this.priorityFapai(helpInfo.estimateLevel, p, helpInfo, helpInfo.coolingcycle);
-    }
-  }
-
-  async priorityFapai(star, p, helpInfo, coolingcycle): Promise<void> {
-    let cards = [];
-    let useCards = [];
-    const cardNums = [];
-
-    let jokerCount = 0;
-    const num = this.getCardNum();
-    let maxJokerCount = 0;
-    const userOtherCard = this.calcPlayerCardNums(p.cards, num);
-    const userJokerCard = this.calcPlayerCardNums(p.cards, 16) + this.calcPlayerCardNums(p.cards, 17);
-    const userJokerCardLists = [...this.calcPlayerCardLists(p.cards, 16), ...this.calcPlayerCardLists(p.cards, 17)];
-    useCards = [...this.calcPlayerCardLists(p.cards, num), ...userJokerCardLists];
-    // 是否需要生成大小王
-    if (this.rule.useJoker) {
-      // 判断生成joker数量
-      jokerCount = this.getJokerNum(star);
-      maxJokerCount = Math.max(userJokerCard, jokerCount);
-      logger.info(`${new Date()}：${p.model.shortId}持有joker数量：${maxJokerCount}`);
-      jokerCount = userJokerCard >= jokerCount ? 0 : jokerCount - userJokerCard;
-      const jokerCard = this.createJokerCard(jokerCount);
-      // 生成指定张数的大小王
-      if (jokerCount > 0 && jokerCard.length > 0) cards = [...cards, ...jokerCard];
-      else jokerCount = 0;
-    }
-
-    // 剩余需要救助的张数
-    const redidueOtherNum = star - maxJokerCount;
-    const residueNum = (redidueOtherNum >= 7 ? 7 : (redidueOtherNum > 4 ? redidueOtherNum : 4));
-    logger.info(`${new Date()}：${p.model.shortId}预计生成特殊牌:${num}数量：${residueNum}，用户持有特殊牌:${num}数量：${userOtherCard}`);
-    const cardOtherNum = userOtherCard >= residueNum ? 0 : residueNum - userOtherCard;
-    logger.info(`${new Date()}：${p.model.shortId}最终生成特殊牌:${num}数量：${cardOtherNum}`);
-    cardNums.push(num);
-
-    // 生成剩余救助牌
-    const otherCard = this.createOtherCard(cardOtherNum, num, p);
-    cards = [...cards, ...otherCard];
-
-    if (!p.cards) p.cards = [];
-    // 从其他用户手中换牌
-    await this.changePlayerCards(cards, p, cardNums);
-
-    p.cards = [...p.cards, ...cards];
-
-    // 生成救助记录
-    await RateRecordModel.create({
-      player: p._id, recordId: helpInfo._id, cardLists: cards, jokerCount: this.rule.jokerCount,
-      useJoker: this.rule.useJoker, coolingcycle, createAt: new Date(), level: helpInfo.estimateLevel,
-      room: this.room._id, cards: p.cards, useCards, juIndex: this.room.game.juIndex, game: "zhadan"
-    });
-
-    const treasure = await TreasureBox.findOne({level: helpInfo.treasureLevel}).lean();
-    await PlayerHelpDetail.findByIdAndUpdate(helpInfo._id, {
-      count: helpInfo.count - 1,
-      juCount: helpInfo.count > 1 ? treasure.juCount : 0,
-      isHelp: helpInfo.count > 1
-    });
-  }
-
-  calcPlayerCardNums(cards, value) {
-    let nums = 0;
-    cards.map((card: any) => {
-      if (card.value === value) nums++;
-    })
-
-    return nums;
-  }
-
-  calcPlayerCardLists(cards, value) {
-    const lists = [];
-    cards.map((card: any) => {
-      if (card.value === value) lists.push(card);
-    })
-
-    return lists;
-  }
-
-  changePlayerCards(cards, p, cardNums) {
-    const promises = [];
-    for (let i = 0; i < cards.length; i++) {
-      const card0 = this.popUserCard(p, cardNums);
-      if (!card0) return;
-      promises.push(this.changeCards(cards[i], card0, p));
-    }
-    return Promise.all(promises);
-  }
-
-  popUserCard(p, cardNums) {
-    const index = p.cards.findIndex(card => ![...[16, 17], ...cardNums].includes(card.value));
-    return index !== -1 ? p.cards.splice(index, 1)[0] : {};
-  }
-
-  async changeCards(card, card0, p) {
-    for (let i = 0; i < this.players.length; i++) {
-      // 不从自己手上换牌
-      if (this.players[i]._id === p._id) continue;
-
-      const user = this.players[i];
-      const index = user.cards.findIndex(c => c.value === card.value && c.type === card.type);
-      if (index !== -1) {
-        user.cards.splice(index, 1);
-        user.cards.push(card0);
-        break;
-      }
-    }
-  }
-
-  createOtherCard(residueNum, num, p) {
-    const cardTypes = this.createCardTypes(num, p);
-    const usedCards = [];
-    const cards = [];
-    for (let i = 0; i < residueNum; i++) {
-      const card = cardTypes.find((card1: any) => card1.count < 2);
-      if (!card) this.createOtherCard(residueNum, num, p);
-      const index = this.cards.findIndex(c => c.value === num && c.type === card.type);
-      if (index !== -1) {
-        usedCards.push(...this.cards.splice(index, 1));
-        cards.push(new Card(card.type, num));
-        card.count += 1;
-      }
-    }
-    this.cards.push(...usedCards);
-
-    return cards;
-  }
-
-  createCardTypes(num, p) {
-    const cardTypes = [{type: CardType.Club, count: 0}, {type: CardType.Diamond, count: 0}, {
-      type: CardType.Heart,
-      count: 0
-    }, {type: CardType.Spades, count: 0}];
-    for (let i = 0; i < this.players.length; i++) {
-      if (this.players[i]._id !== p._id) continue;
-
-      this.players[i].cards.map(c => {
-        if (c.value === num) {
-          const index = cardTypes.findIndex(c1 => c1.type === c.type);
-          if (index !== -1) cardTypes[index].count++;
-        }
-      })
-    }
-
-    return cardTypes;
-  }
-
-  getCardNum() {
-    const num = Math.floor(Math.random() * 13) + 1;
-    if ([2, 3].includes(num)) return this.getCardNum();
-
-    return num;
-  }
-
-  createJokerCard(jokerCount) {
-    const cards = [];
-    const cardType = [{type: 16, count: 0}, {type: 17, count: 0}];
-    for (let i = 0; i < jokerCount; i++) {
-      const card = cardType.find((card1: any) => card1.count < (this.rule.jokerCount === 6 ? 3 : 2));
-      if (!card) this.createJokerCard(jokerCount);
-      const index = this.cards.findIndex(c => c.value === card.type && c.type === CardType.Joker);
-      if (index !== -1) {
-        const joker = this.cards.splice(index, 1)[0];
-        cards.push(new Card(joker.type, card.type));
-        card.count += 1;
-      }
-    }
-
-    return cards;
-  }
-
-  getJokerNum(star) {
-    const jokerNum = this.rule.useJoker ? this.rule.jokerCount : 0;
-    let minJokerNum = 0;
-    if (star > 7) minJokerNum = star - 7;
-    const num = Math.floor(Math.random() * jokerNum);
-    const min = Math.min(num, star - 4, 3);
-    return Math.max(min, minJokerNum);
-  }
-
-  async fourJokersReward() {
-
-    const fourJokerReward = this.rule.specialReward
-    if (!fourJokerReward || fourJokerReward <= 0) {
-      return
-    }
-    if (this.room.game.juIndex > 1) {
-      this.players.forEach(async p => {
-        if (this.haveFourJokers(p)) {
-          await PlayerModel.findByIdAndUpdate(p._id,
-            {$inc: {redPocket: fourJokerReward}},
-            {new: true})
-
-          await RedPocketRecordModel.create({
-            player: p._id, amountInFen: fourJokerReward,
-            createAt: new Date(), from: `四王奖励 room:${this.room._id}`
-          })
-          const playerIndex = this.atIndex(p)
-          this.room.broadcast('room/fourJokersReward', {
-            playerId: p._id,
-            playerName: p.model.name,
-            index: playerIndex,
-            amountInFen: fourJokerReward
-          })
-        }
-      })
-    }
-  }
-
-  async fapai() {
-
-    await this._fapai()
+  async fapai(payload) {
+    await this._fapai(payload);
 
     if (this.players.some(p => this.haveFourJokers(p)) && this.rollReshuffle()) {
-      this._fapai()
+      await this._fapai(payload);
     }
 
-    const isZhadanOpen = await service.utils.getGlobalConfigByName("zhadanHelp");
-    if (!this.room.rule.isPublic && Number(isZhadanOpen) === 1) await this.executeShuffle();
-
-    this.players[0].team = this.players[2].team = Team.HomeTeam
-    this.players[1].team = this.players[3].team = Team.AwayTeam
-  }
-
-  // 公共房发牌
-  async publicRoomFapai() {
-    this.stateData = {};
-    this.turn = 1;
-    this.cards = manager.withJokerCards(8);
-    const playerCards = manager.makeCards(this.cards);
-    this.remainCards = this.cards.length;
-    for (let i = 0; i < this.players.length; i++) {
-      const p = this.players[i];
-      p.cards = playerCards[i].map(value => value.card);
-      // p.cards = [...p.cards, ...this.takeQuarterCards(p)];
-    }
-
-    // 分配队友
     this.players[0].team = this.players[2].team = Team.HomeTeam
     this.players[1].team = this.players[3].team = Team.AwayTeam
   }
@@ -597,22 +341,26 @@ abstract class Table implements Serializable {
   listenPlayer(player: PlayerState) {
     this.listenerOn = ['game/da', 'game/guo', 'game/cancelDeposit', 'game/refresh']
 
-    player.msgDispatcher.on('game/da', msg => this.onPlayerDa(player, msg))
+    player.msgDispatcher.on('game/da', async msg => await this.onPlayerDa(player, msg))
     player.msgDispatcher.on('game/guo', msg => this.onPlayerGuo(player))
+    // 复活成功通知
+    player.msgDispatcher.on('game/restoreGame', msg => this.onPlayerRrestoreGame(player))
     player.msgDispatcher.on('game/cancelDeposit', msg => this.onCancelDeposit(player))
     // 手动刷新
     player.msgDispatcher.on('game/refresh', async () => {
-      player.sendMessage('room/refresh', await this.restoreMessageForPlayer(player));
+      player.sendMessage('room/refresh', {ok: true, data: await this.restoreMessageForPlayer(player)});
     })
+    // 破产接口
+    player.msgDispatcher.on('game/broke', async msg => await this.onPlayerBroke(player))
   }
 
   onCancelDeposit(player: PlayerState) {
     player.cancelDeposit()
     this.room.robotManager.disableRobot(player._id)
-    this.autoCommitFunc()
+    this.autoCommitFunc(this.players[this.status.current.seatIndex].onDeposit)
   }
 
-  autoCommitForPlayers() {
+  async autoCommitForPlayers() {
     const player = this.players.find(x => x.seatIndex === this.currentPlayerStep)
     if (!player || player.msgDispatcher.isRobot()) {
       // 忽略机器人
@@ -620,43 +368,49 @@ abstract class Table implements Serializable {
     }
 
     player.onDeposit = true
+    player.sendMessage('game/startDeposit', {ok: true, data: {}});
+
     if (!this.canGuo()) {
-      const card = player.cards.sort((x, y) => x.point - y.point)[0]
-      this.onPlayerDa(player, {cards: [card]})
-      return
+      const cards = this.promptWithFirstPlay(player);
+      return await this.onPlayerDa(player, {cards: cards})
     }
 
-    this.guoPai(player)
+    const cards = this.promptWithPattern(player);
+    if (cards.length > 0) {
+      return await this.onPlayerDa(player, {cards: cards})
+    }
+
+    return this.guoPai(player);
   }
 
   moveToNext() {
-    let nextSeatIndex = this.currentPlayerStep
+    let nextSeatIndex = this.currentPlayerStep;
 
-    let findNext = false
+    let findNext = false;
     while (!findNext) {
-      nextSeatIndex = (nextSeatIndex + 1) % this.playerCount
-      const playerState = this.players[nextSeatIndex]
+      nextSeatIndex = (nextSeatIndex + 1) % this.playerCount;
+      const playerState = this.players[nextSeatIndex];
 
       if (nextSeatIndex === this.status.from) {
-        this.status.lastPattern = null
-        this.status.lastCards = []
+        this.status.lastPattern = null;
+        this.status.lastCards = [];
 
         if (playerState.cards.length === 0 && playerState.foundFriend) {
-          nextSeatIndex = playerState.teamMate
-          this.cleanCards(playerState)
-          findNext = true
+          nextSeatIndex = playerState.teamMate;
+          this.cleanCards(playerState);
+          findNext = true;
         }
       }
 
       if (playerState.cards.length > 0) {
-        findNext = true
+        findNext = true;
       } else {
-        this.cleanCards(playerState)
+        this.cleanCards(playerState);
       }
     }
 
-    this.status.current.seatIndex = nextSeatIndex
-    this.status.current.step += 1
+    this.status.current.seatIndex = nextSeatIndex;
+    this.status.current.step += 1;
   }
 
   cleanCards(player: PlayerState) {
@@ -664,7 +418,7 @@ abstract class Table implements Serializable {
       return
     }
 
-    this.room.broadcast('game/cleanCards', {index: player.index})
+    this.room.broadcast('game/cleanCards', {ok: true, data: {index: player.index}})
     player.cleaned = true
 
   }
@@ -673,60 +427,97 @@ abstract class Table implements Serializable {
     return this.currentPlayerStep === player.seatIndex
   }
 
-  daPaiFail(player) {
-    player.sendMessage('game/daReply', {ok: false, info: '不是您的阶段'})
+  daPaiFail(player, info = TianleErrorCode.systemError) {
+    player.sendMessage('game/daCardReply', {ok: false, info, data: {roomId: this.room._id, deposit: player.onDeposit}})
   }
 
-  guoPaiFail(player) {
-    player.sendMessage('game/guoReply', {ok: false, info: '不是您的阶段'})
+  guoPaiFail(player, info = TianleErrorCode.systemError) {
+    player.sendMessage('game/guoCardReply', {ok: false, info})
   }
 
   autoCommitFunc(playerIsOndeposit = false) {
-    // 不托管
-    return;
-    // if (this.rule.autoCommit) {
-    //   clearTimeout(this.autoCommitTimer)
-    //   this.autoCommitStartTime = Date.now();
-    //   const primaryDelayTime = playerIsOndeposit ? 1000 : this.rule.autoCommit * 1000
-    //   const delayTime = primaryDelayTime - (Date.now() - this.autoCommitStartTime)
-    //   this.autoCommitTimer = setTimeout(() => {
-    //     this.autoCommitForPlayers()
-    //   }, delayTime)
-    // }
+    let time = 15;
+
+    if (!this.room.isPublic && !this.rule.ro.autoCommit) {
+      return ;
+    }
+    if (!this.room.isPublic && this.rule.ro.autoCommit && this.tableState !== 'selectMode') {
+      time = (this.rule.ro.autoCommit + 1);
+    }
+
+    clearTimeout(this.autoCommitTimer)
+    this.autoCommitStartTime = Date.now();
+    const primaryDelayTime = playerIsOndeposit ? 2000 : time * 1000
+    const delayTime = primaryDelayTime - (Date.now() - this.autoCommitStartTime)
+    this.autoCommitTimer = setTimeout(async () => {
+      await this.autoCommitForPlayers()
+    }, delayTime)
   }
 
-  onPlayerDa(player, {cards: plainCards}, onDeposit?) {
-    if (Date.now() - this.shuffleDelayTime < 0) {
-      player.sendMessage('game/daReply', {
-        ok: false,
-        info: '错误',
-      })
-      return
-    }
+  async onPlayerDa(player, {cards: plainCards}, onDeposit?) {
     if (!this.isCurrentStep(player)) {
-      this.daPaiFail(player)
-      return
+      this.daPaiFail(player, TianleErrorCode.notDaRound);
+      return;
     }
-    const cards = plainCards.map(Card.from)
-
-    this.status.lastIndex = this.currentPlayerStep
-
+    const cards = plainCards.map(Card.from);
+    this.status.lastIndex = this.currentPlayerStep;
     const currentPattern = isGreaterThanPatternForPlainCards(plainCards, this.status.lastPattern, player.cards.length);
 
     if (player.tryDaPai(cards.slice()) && patternCompare(currentPattern, this.status.lastPattern) > 0) {
-      this.daPai(player, cards, currentPattern, onDeposit)
+      await this.daPai(player, cards, currentPattern, onDeposit)
     } else {
       this.cannotDaPai(player, cards)
     }
   }
 
-  daPai(player: PlayerState, cards: Card[], pattern: IPattern, onDeposit?) {
+  async onPlayerRrestoreGame(player) {
+    this.alreadyRechargeCount++;
+    if (this.alreadyRechargeCount >= this.waitRechargeCount) {
+      this.room.robotManager.model.step = RobotStep.running;
+    }
+
+    // 接入托管
+    if (this.status.current.seatIndex !== -1 && this.status.current.seatIndex === player.seatIndex) {
+      if (this.players[this.status.current.seatIndex]) {
+        this.autoCommitFunc(this.players[this.status.current.seatIndex].onDeposit);
+      }
+    }
+
+    this.room.broadcast('game/restoreGameReply', {
+      ok: true,
+      data: {roomId: this.room._id, index: player.seatIndex, step: this.room.robotManager.model.step}
+    });
+  }
+
+  async onPlayerBroke(player) {
+    if (!player.robot) {
+      this.alreadyRechargeCount++;
+      if (this.alreadyRechargeCount >= this.waitRechargeCount) {
+        this.room.robotManager.model.step = RobotStep.running;
+      }
+    }
+
+    // 如果牌局是当前用户操作，则自动过牌
+    if (this.status.current.seatIndex !== -1 && this.status.current.seatIndex === player.seatIndex) {
+      this.onPlayerGuo(player);
+    }
+
+    player.broke = true;
+
+    this.room.broadcast("game/player-over", {ok: true, data: {
+        index: player.seatIndex,
+        _id: player.model._id.toString(),
+        shortId: player.model.shortId,
+        broke: player.broke
+      }})
+  }
+
+  async daPai(player: PlayerState, cards: Card[], pattern: IPattern, onDeposit?) {
 
     player.daPai(cards.slice(), pattern)
     const remains = player.remains
 
     this.status.from = this.status.current.seatIndex
-
     this.status.lastPattern = pattern
     this.status.lastCards = cards
     this.status.fen += this.fenInCards(cards)
@@ -739,40 +530,159 @@ abstract class Table implements Serializable {
 
     let teamMateCards = []
     if (remains === 0) {
-      player.winOrder = this.status.winOrder++
+      player.winOrder = ++this.status.winOrder;
       teamMateCards = this.teamMateCards(player)
+      this.room.broadcast("game/showWinOrder", {ok: true, data: {index: player.seatIndex, winOrder: player.winOrder}})
     }
 
     this.moveToNext()
-    player.sendMessage('game/daReply', {
-      ok: true, remains, teamMateCards,
-      onDeposit: player.onDeposit || !!onDeposit
+    player.sendMessage('game/daCardReply', {
+      ok: true,
+      data: {
+        remains, teamMateCards,
+        onDeposit: player.onDeposit || !!onDeposit
+      }
     })
 
     const isGameOver = this.isGameOver()
     const nextPlayer = isGameOver ? -1 : this.currentPlayerStep
+    const score = this.bombScorer(pattern);
 
     this.room.broadcast('game/otherDa', {
-      cards,
-      remains,
-      index: player.seatIndex,
-      next: nextPlayer,
-      pattern: this.status.lastPattern,
-      fen: this.status.fen,
-      bomb: this.bombScorer(pattern),
-      newBombScore: player.bombScore(this.bombScorer.bind(this))
+      ok: true, data: {
+        cards,
+        remains,
+        index: player.seatIndex,
+        next: nextPlayer,
+        pattern: this.status.lastPattern,
+        fen: this.status.fen,
+        bomb: score,
+        newBombScore: player.bombScore(this.bombScorer.bind(this))
+      }
     })
+
+    // 实时结算炸弹分数
+    // if (this.room.isPublic && score > 0) {
+    //   await this.calcBombScore(player, score);
+    // }
+
     this.notifyTeamMateWhenTeamMateWin(player, cards)
     if (this.players[nextPlayer]) {
-      this.autoCommitFunc(this.players[nextPlayer].onDeposit)
+      // if (this.players[nextPlayer].broke) {
+      //   this.onPlayerGuo(this.players[nextPlayer]);
+      // } else {
+      //   this.autoCommitFunc(this.players[nextPlayer].onDeposit)
+      // }
+
+      this.autoCommitFunc(this.players[nextPlayer].onDeposit);
     }
     if (isGameOver) {
-      this.showGameOverPlayerCards()
-      player.zhua(this.status.fen)
+      const lostPlayers = this.players.filter(p => p.winOrder === 99);
+      for (let i = 0; i < lostPlayers.length; i++) {
+        this.room.broadcast("game/showWinOrder", {ok: true, data: {index: lostPlayers[i].seatIndex, winOrder: lostPlayers[i].winOrder}});
+      }
+
+      this.showGameOverPlayerCards();
+      player.zhua(this.status.fen);
+      this.room.broadcast('game/zhuaFen', {
+        ok: true, data: {
+          index: this.status.from,
+          win: this.status.fen,
+          zhuaFen: player.zhuaFen
+        }
+      })
       this.status.current.seatIndex = -1
       console.log('game over set seatIndex -1');
-      this.gameOver()
+      await this.gameOver()
     }
+  }
+
+  async calcBombScore(player, multiple) {
+    const conf = await service.gameConfig.getPublicRoomCategoryByCategory(this.room.gameRule.categoryId);
+    let goldNumber = conf.base * conf.Ante * multiple;
+    const waits = [];
+    const changeGolds = [{index: 0, gold: 0, residueGold: 0, broke: false},
+      {index: 1, gold: 0, residueGold: 0, broke: false},{index: 2, gold: 0, residueGold: 0, broke: false},
+      {index: 3, gold: 0, residueGold: 0, broke: false}];
+
+    for (let i = 0; i < this.players.length; i ++) {
+      const p = this.players[i];
+      let changeGold = goldNumber;
+
+      // 用户是被炸的玩家，并且用户未破产
+      if (p._id.toString() !== player._id.toString() && !p.broke) {
+        const currency = await this.PlayerGoldCurrency(p._id);
+        if (changeGold > currency) {
+          changeGold = currency;
+        }
+
+        changeGolds[i].gold -= changeGold;
+        changeGolds[player.seatIndex].gold += changeGold;
+
+        // 输家扣除金豆，赢家增加金豆
+        await this.room.addBombScore(player._id, p._id, changeGold);
+
+        const pModel = await service.playerService.getPlayerModel(p._id);
+        changeGolds[i].residueGold = pModel.gold;
+        changeGolds[i].broke = changeGolds[i].residueGold <= 0;
+
+        // 获取复活用户数据
+        let params = {
+          index: p.seatIndex,
+          robot: p.robot,
+          _id: p.model._id.toString(),
+          shortId: p.model.shortId,
+          broke: p.broke
+        };
+        if (changeGolds[i].broke) {
+          if (!params.robot) {
+            if (!p.broke) {
+              waits.push(params);
+            }
+          } else {
+            if (!p.broke) {
+              // 机器人破产,设置用户为破产状态
+              params.broke = true;
+              this.room.broadcast("game/player-over", {ok: true, data: {
+                index: i,
+                _id: p.model._id.toString(),
+                shortId: p.model.shortId,
+                broke: p.broke
+              }})
+            }
+          }
+        }
+      }
+    }
+
+    const playerModel = await service.playerService.getPlayerModel(player._id);
+    changeGolds[player.seatIndex].residueGold = playerModel.gold;
+    changeGolds[player.seatIndex].broke = changeGolds[player.seatIndex].residueGold <= 0;
+
+    this.room.broadcast("game/playerChangeGolds", {ok: true, data: changeGolds});
+
+    if (waits.length > 0) {
+      const changeStateFunc = async() => {
+        this.room.robotManager.model.step = RobotStep.waitRuby;
+        this.waitRechargeCount = waits.length;
+
+        this.room.broadcast("game/waitRechargeReply", {ok: true, data: waits});
+      }
+
+      setTimeout(changeStateFunc, 2000);
+    }
+
+  }
+
+  // 根据币种类型获取币种余额
+  async PlayerGoldCurrency(playerId) {
+    const model = await service.playerService.getPlayerModel(playerId);
+
+    if (this.rule.currency === Enums.goldCurrency) {
+      return model.gold;
+    }
+
+    return model.tlGold;
   }
 
   async restoreMessageForPlayer(player: PlayerState) {
@@ -789,7 +699,7 @@ abstract class Table implements Serializable {
       mode: this.mode,
       currentPlayer: this.status.current.seatIndex,
       soloPlayerIndex: this.soloPlayerIndex,
-      soloPlayerName: soloPlayer && soloPlayer.model.name,
+      soloPlayerName: soloPlayer && soloPlayer.model.nickname,
       lastPattern: this.status.lastPattern,
       lastIndex: this.status.lastIndex,
       friendCard: this.friendCard,
@@ -821,12 +731,12 @@ abstract class Table implements Serializable {
     const playersCard = []
     this.players.forEach(p => {
       if (p.cards.length > 0) {
-        playersCard.push([p.seatIndex, p.cards])
+        playersCard.push({index: p.seatIndex, cards: p.cards})
       }
     })
-    this.room.broadcast('game/gameOverPlayerCards', {
-      playersCard
-    })
+    this.room.broadcast('game/gameOverPlayerCards', {ok: true, data: {
+        playersCard
+      }})
   }
 
   homeTeamPlayers(): PlayerState[] {
@@ -863,11 +773,10 @@ abstract class Table implements Serializable {
   }
 
   cannotDaPai(player, cards) {
-    player.sendMessage('game/daReply', {
+    player.sendMessage('game/daCardReply', {
       ok: false,
-      info: '打牌错误',
-      daCards: cards,
-      inHandle: player.cards
+      info: TianleErrorCode.cardDaError,
+      data: {index: player.index, daCards: cards, inHandle: player.cards}
     })
   }
 
@@ -882,7 +791,7 @@ abstract class Table implements Serializable {
     }
 
     if (!this.canGuo()) {
-      player.sendMessage("game/guoReply", {ok: false, info: '不能过'})
+      player.sendMessage("game/guoCardReply", {ok: false, info: TianleErrorCode.guoError});
       return
     }
 
@@ -892,7 +801,7 @@ abstract class Table implements Serializable {
   guoPai(player: PlayerState, onDeposit?) {
 
     player.guo()
-    player.sendMessage("game/guoReply", {ok: true, onDeposit: player.onDeposit || !!onDeposit})
+    player.sendMessage("game/guoCardReply", {ok: true, data: {onDeposit: player.onDeposit || !!onDeposit}})
 
     this.moveToNext()
 
@@ -900,26 +809,31 @@ abstract class Table implements Serializable {
       const zhuaFenPlayer = this.players[this.status.from]
       zhuaFenPlayer.zhua(this.status.fen)
 
-      this.room.broadcast('game/zhuaFen', {
-        index: this.status.from,
-        win: this.status.fen,
-        zhuaFen: zhuaFenPlayer.zhuaFen
-      })
+      this.room.broadcast('game/zhuaFen', {ok: true, data: {
+          index: this.status.from,
+          win: this.status.fen,
+          zhuaFen: zhuaFenPlayer.zhuaFen
+        }})
 
       this.status.fen = 0
     }
-    this.room.broadcast("game/otherGuo", {
-      index: player.seatIndex,
-      next: this.currentPlayerStep,
-      pattern: this.status.lastPattern,
-      fen: this.status.fen
-    })
+
+    this.room.broadcast("game/otherGuo", {ok: true, data: {
+        index: player.seatIndex,
+        next: this.currentPlayerStep,
+        pattern: this.status.lastPattern,
+        fen: this.status.fen
+      }})
 
     const isGameOver = this.isGameOver()
     const nextPlayer = isGameOver ? -1 : this.currentPlayerStep
 
     if (this.players[nextPlayer]) {
-      this.autoCommitFunc(this.players[nextPlayer].onDeposit)
+      if (this.players[nextPlayer].broke) {
+        this.onPlayerGuo(this.players[nextPlayer]);
+      } else {
+        this.autoCommitFunc(this.players[nextPlayer].onDeposit)
+      }
     }
   }
 
@@ -1078,11 +992,23 @@ abstract class Table implements Serializable {
   }
 
   listenRoom(room) {
-    room.on('reconnect', this.onReconnect = (playerMsgDispatcher, index) => {
+    room.on('reconnect', this.onReconnect = async (playerMsgDispatcher, index) => {
+      let m = await RoomTimeRecord.findOne({ roomId: this.room._id });
+      if (m) {
+        const currentTime = new Date().getTime();
+        const startTime = Date.parse(m.createAt);
+
+        console.warn("startTime %s currentTime %s", startTime, currentTime);
+
+        if (currentTime - startTime > config.game.dissolveTime) {
+          return await this.room.forceDissolve();
+        }
+      }
+
       const player = this.players[index]
       this.replaceSocketAndListen(player, playerMsgDispatcher)
-      const content = this.reconnectContent(index, player)
-      player.sendMessage('game/reconnect', content)
+      const content = await this.reconnectContent(index, player)
+      player.sendMessage('game/reconnect', {ok: true, data: content})
     })
 
     room.once('empty', this.onRoomEmpty = () => {
@@ -1132,6 +1058,7 @@ abstract class Table implements Serializable {
     clearTimeout(this.autoCommitTimer)
     this.removeRoomListener()
     this.removeAllPlayerListeners()
+    this.players = [];
   }
 
   teamMateCards(player: PlayerState): Card[] {
@@ -1264,24 +1191,37 @@ abstract class Table implements Serializable {
     }, 0)
   }
 
-  private async _fapai() {
+  private async _fapai(payload) {
     this.initCards()
     this.shuffle()
     this.stateData = {}
 
     for (let i = 0; i < this.players.length; i++) {
-      const p = this.players[i]
-      p.cards = [...p.cards, ...this.takeQuarterCards(p)];
+      const p = this.players[i];
+      p.cards = this.takeQuarterCards(p, this.rule.test && payload.cards && payload.cards[i] ? payload.cards[i] : []);
     }
   }
 
-  private haveFourJokers(p: PlayerState) {
-    return p.cards.filter(c => c.type === CardType.Joker).length >= 4
-  }
+  async getCardRecorder(player) {
+    const cardRecorder = await GoodsProp.findOne({propType: shopPropType.jiPaiQi}).lean();
+    if (!cardRecorder) {
+      return {status: false, day: 0};
+    }
 
-  private rollReshuffle() {
-    return Math.random() < 0.83
-  }
+    let isHave = false;
+    let times = 0;
+
+    const playerProp = await PlayerProp.findOne({playerId: player._id.toString(), propId: cardRecorder.propId});
+
+    if (playerProp) {
+      // 用户是否拥有该道具
+      isHave = playerProp.times === -1 || playerProp.times >= new Date().getTime();
+      // 道具有效期
+      times = playerProp.times === -1 || playerProp.times >= new Date().getTime() ? playerProp.times : null;
+    }
+
+    return {status: !!(isHave && times), day: times}
+  };
 
   private drawGameBombScore(player: PlayerState): number {
     const unUsedBombs = this.getPlayerUnUsedBombs(player);
@@ -1297,7 +1237,7 @@ abstract class Table implements Serializable {
   private notifyTeamMateWhenTeamMateWin(player: PlayerState, daCards: Card[]) {
     const teamMate = this.players[player.teamMate]
     if (teamMate && teamMate.cards.length === 0) {
-      teamMate.sendMessage('game/teamMateCards', {cards: player.cards, daCards})
+      teamMate.sendMessage('game/teamMateCards', {ok: true, data: {cards: player.cards, daCards}})
     }
   }
 

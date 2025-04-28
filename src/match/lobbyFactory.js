@@ -1,6 +1,8 @@
 import createClient from "../utils/redis";
 import {service} from "../service/importService";
 import Enums from "./majiang/enums";
+import * as config from "../config";
+import Club from "../database/models/club";
 
 /**
  *
@@ -27,41 +29,86 @@ export function LobbyFactory({gameName, roomFactory, roomFee, normalizeRule = as
 
     constructor() {
       this.publicRooms = new Map();
+      this.canJoinRooms = new Map();
       this.playerRoomTable = new Map();
     }
 
-    async getAvailablePublicRoom(playerId, roomId, rule) {
-      // let found = null;
-      // for (const kv of this.publicRooms) {
-      //   const room = kv[1];
-      //   if (!room.isFull() &&
-      //     room.isPublic &&
-      //     room.gameRule.categoryId === rule.categoryId &&
-      //     !room.gameState
-      //   ) {
-      //     found = room;
-      //     break;
-      //   }
-      // }
-      // if (found) {
-      //   return found;
-      // }
+    async getAvailablePublicRoom(playerId, roomId, rule, playerModel) {
+      let found = null;
+      if (!playerModel.gameJuShu || (playerModel.gameJuShu && playerModel.gameJuShu[rule.gameType] >= config.game.noviceProtection) || playerModel.robot) {
+        let canJoinRooms = await redisClient.hgetallAsync("canJoinRooms");
+        if (canJoinRooms) {
+          for (let i = 0; i < Object.keys(canJoinRooms).length; i++) {
+            const roomId = Object.keys(canJoinRooms)[i];
+            for (const kv of this.publicRooms) {
+              if (Number(kv[0]) === Number(roomId)) {
+                const room = kv[1];
+                if (!room.isFull() && room.isPublic && room.gameRule.categoryId === rule.categoryId && !room.gameState) {
+                  found = room;
+                  break;
+                }
+              }
+            }
+            if (found) {
+              return found;
+            }
+          }
+        }
+
+        if (found) {
+          return found;
+        }
+      }
+
       const ret = await this.createRoom(true, roomId, rule);
       ret.ownerId = playerId;
       this.publicRooms.set(roomId, ret);
+      await redisClient.hsetAsync("canJoinRooms", roomId, JSON.stringify(ret));
       return ret;
     }
 
-    hasRoom(id) {
-      return Boolean(this.publicRooms.get(id));
+    async getClubOwner(clubId) {
+      const club = await Club.findOne({_id: clubId}).populate('owner')
+      if (!club) {
+        return
+      }
+      return club.owner;
     }
 
-    getRoom(id) {
-      if (id) {
-        return this.publicRooms.get(id);
+    async getClubRooms(clubId) {
+      let clubRooms = [];
+      const roomNumbers = await redisClient.smembersAsync('clubRoom:' + clubId)
+
+      const roomInfoKeys = roomNumbers.map(num => 'room:info:' + num)
+
+      let roomDatas = []
+      if (roomInfoKeys.length > 0) {
+        roomDatas = await redisClient.mgetAsync(roomInfoKeys)
       }
 
-      return null;
+      for (const roomData of roomDatas) {
+        const roomInfo = JSON.parse(roomData)
+        if (roomInfo) {
+          const rule = roomInfo.gameRule || 'err';
+          const roomNum = roomInfo._id || 'err';
+          const roomCreator = roomInfo.creatorName || 'err';
+          // const playerOnline = roomInfo.players.filter(x => x).length + roomInfo.disconnected.length
+          // 过滤机器人, null 玩家
+          const playerOnline = roomInfo.playersOrder.filter(value => value).length;
+          const juIndex = roomInfo.game.juIndex
+
+          clubRooms.push({roomNum, roomCreator, rule, playerOnline, juIndex});
+        }
+      }
+
+      return clubRooms.sort((x, y) => {
+        if (Math.max(x.playerOnline, y.playerOnline) < 4) {
+          return y.playerOnline - x.playerOnline
+        } else {
+          return x.playerOnline - y.playerOnline
+        }
+
+      })
     }
 
     /**
@@ -76,16 +123,55 @@ export function LobbyFactory({gameName, roomFactory, roomFee, normalizeRule = as
       return JSON.parse(roomData);
     }
 
-    async createRoom(isPublic, roomId, rule = {}) {
+    async createClubRoom(isPublic = false, roomId, rule = {}, clubId, clubOwnerPlayer) {
       let newRule = Object.assign({}, rule, {isPublic})
+
+      redisClient.sadd('clubRoom:' + clubId, roomId)
       const room = roomFactory(roomId, newRule)
-      await room.init();
-      this.listenRoom(room)
-      redisClient.sadd('room', roomId)
+      await room.setClub(clubId, clubOwnerPlayer);
+      await this.listenRoom(room)
+      await this.listenClubRoom(room)
+
       return room;
     }
 
-    listenRoom(room) {
+    async listenClubRoom(room) {
+      room.on('empty', async () => {
+        const clubId = room.clubId
+        await redisClient.sremAsync('clubRoom:' + clubId, room._id)
+        // console.warn("empty clubId-%s clubBroadcaster-%s", clubId, JSON.stringify(this.clubBroadcaster));
+        this.clubBroadcaster && await this.clubBroadcaster.updateClubRoomInfo(clubId, {})
+        if (room.robotManager) {
+          // 删除机器人
+          await room.robotManager.gameOver();
+          room.robotManager = null;
+        }
+      })
+
+      room.on('join', async () => {
+        const clubId = room.clubId
+        // console.warn("join clubId-%s clubBroadcaster-%s", clubId, JSON.stringify(this.clubBroadcaster));
+        this.clubBroadcaster && await this.clubBroadcaster.updateClubRoomInfo(clubId, {})
+      })
+
+      room.on('leave', async () => {
+        const clubId = room.clubId
+        // console.warn("leave clubId-%s clubBroadcaster-%s", clubId, JSON.stringify(this.clubBroadcaster));
+        this.clubBroadcaster && await this.clubBroadcaster.updateClubRoomInfo(clubId, {})
+      })
+    }
+
+    async createRoom(isPublic, roomId, rule = {}) {
+      let newRule = Object.assign({}, rule, {isPublic})
+      redisClient.sadd('room', roomId)
+      const room = roomFactory(roomId, newRule)
+      await room.init();
+      await this.listenRoom(room)
+
+      return room;
+    }
+
+    async listenRoom(room) {
       room.on('empty', async (disconnectedPlayerIds = []) => {
         disconnectedPlayerIds.forEach(id => {
           service.roomRegister.removePlayerFromGameRoom(id, gameName)
@@ -96,6 +182,7 @@ export function LobbyFactory({gameName, roomFactory, roomFee, normalizeRule = as
         this.publicRooms.delete(room._id);
         if (room.robotManager) {
           // 删除机器人
+          console.warn("room empty dissolve");
           await room.robotManager.gameOver();
           room.robotManager = null;
         }

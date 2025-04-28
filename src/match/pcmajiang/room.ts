@@ -1,7 +1,7 @@
 /**
  * Created by user on 2016-07-04.
  */
-import {ConsumeLogType, GameType, TianleErrorCode} from "@fm/common/constants";
+import {GameType, shopPropType, TianleErrorCode} from "@fm/common/constants";
 import {Channel} from 'amqplib'
 import * as lodash from 'lodash'
 // @ts-ignore
@@ -13,7 +13,6 @@ import ConsumeRecord from '../../database/models/consumeRecord'
 import DiamondRecord from "../../database/models/diamondRecord";
 import DissolveRecord from '../../database/models/dissolveRecord'
 import GameRecord from '../../database/models/gameRecord'
-import PlayerModel from '../../database/models/player'
 import RoomRecord from '../../database/models/roomRecord'
 import PlayerManager from '../../player/player-manager'
 import '../../utils/algorithm'
@@ -25,6 +24,11 @@ import Game from './game'
 import {eqlModelId} from "./modelId"
 import {RobotManager} from "./robotManager";
 import TableState from "./table_state"
+import {service} from "../../service/importService";
+import RoomFeeConfig from "../../database/models/roomFeeConfig";
+import PlayerMedal from "../../database/models/PlayerMedal";
+import PlayerHeadBorder from "../../database/models/PlayerHeadBorder";
+import PlayerProp from "../../database/models/PlayerProp";
 
 const ObjectId = mongoose.Types.ObjectId
 
@@ -162,6 +166,8 @@ class Room extends RoomBase {
       this.playerDisconnect(disconnectPlayer)
     }
 
+    // this.init();
+
     this.readyPlayers = []
     this.gameState = null
     this.scoreMap = {}
@@ -203,14 +209,31 @@ class Room extends RoomBase {
     return 0
   }
 
-  static roomFee(rule): number {
-    if (rule.juShu === 4) {
-      return 1
-    } else if (rule.juShu === 8) {
-      return 2
-    } else {
-      return 3
+  static async roomFee(rule): Promise<number> {
+    const configList = await RoomFeeConfig.find({game: GameType.pcmj}).sort({diamond: 1});
+    const configIndex = configList.findIndex(c => c.juShu === rule.juShu);
+
+    if (rule.ruleId) {
+      if (configIndex !== -1) {
+        if (configList[configIndex].clubMode) {
+          return configList[configIndex].diamond;
+        }
+
+        return configList[configList.length - 1].diamond;
+      }
+
+      return configList[configList.length - 1].diamond;
     }
+
+    if (configIndex !== -1) {
+      if (configList[configIndex].personMode) {
+        return configList[configIndex].diamond;
+      }
+
+      return 0;
+    }
+
+    return configList[configList.length - 1].diamond;
   }
 
   static async recover(json: any, repository: { channel: Channel, userCenter: any }): Promise<Room> {
@@ -292,8 +315,8 @@ class Room extends RoomBase {
     return this.players.find(p => p && p._id === id)
   }
 
-  privateRoomFee(rule): number {
-    return Room.roomFee(rule)
+  async privateRoomFee(rule): Promise<number> {
+    return await Room.roomFee(rule)
   }
 
   recordPlayerEvent(evtType, playerId) {
@@ -321,6 +344,7 @@ class Room extends RoomBase {
 
   canJoin(player) {
     if (!player) {
+      console.warn("player is not exists");
       return false
     }
 
@@ -328,7 +352,7 @@ class Room extends RoomBase {
       return true
     }
 
-    return this.players.filter(x => x != null).length + this.disconnected.length < this.capacity
+    return true;
   }
 
   mergeOrder() {
@@ -358,15 +382,6 @@ class Room extends RoomBase {
     }
   }
 
-  removePlayer(player) {
-    for (let i = 0; i < this.players.length; i++) {
-      if (this.players[i] === player) {
-        this.players[i] = null
-        break
-      }
-    }
-  }
-
   isEmpty() {
     for (let i = 0; i < this.players.length; i++) {
       if (this.players[i] != null) {
@@ -388,12 +403,6 @@ class Room extends RoomBase {
       const state = states[index]
       const id = state.model._id
       const score = state.score
-      if (club && this.gameRule.useClubGold) {
-        state.model.clubGold += score;
-        if (state) {
-          await this.adjustPlayerClubGold(club, score, state.model._id, "游戏输赢，房间号：" + this._id)
-        }
-      }
 
       if (this.playerGainRecord[id]) {
         this.playerGainRecord[id] += score
@@ -436,14 +445,17 @@ class Room extends RoomBase {
     })
   }
 
-  updatePosition(player, position) {
-    if (position) {
-      player.model.position = position
-
-      const positions = this.players.map(p => p && p.model)
-
-      this.broadcast('room/playersPosition', {ok: true, data: {positions}});
+  async updatePosition() {
+    const positions = [];
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      if (p) {
+        const position = i;
+        positions.push({_id: p._id, shortId: p.model.shortId, position});
+      }
     }
+
+    this.broadcast("game/updatePosition", {ok: true, data: {positions}});
   }
 
   async recordRoomScore(roomState = 'normal'): Promise<any> {
@@ -468,9 +480,6 @@ class Room extends RoomBase {
     //   roomState = 'zero_ju'
     // }
     const stateInfo = this.game.juIndex === this.rule.ro.juShu ? roomState + '_last' : roomState
-    if (this.isPayClubGold(roomState)) {
-      await this.updatePlayerClubGold();
-    }
 
     const roomRecord = {
       players, scores,
@@ -590,10 +599,40 @@ class Room extends RoomBase {
   }
 
   async joinMessageFor(newJoinPlayer): Promise<any> {
+    let medalId = null;
+    let headerBorderId = null;
+    let emojiIds = [];
+    // 获取用户称号
+    const playerMedal = await PlayerMedal.findOne({playerId: newJoinPlayer._id, isUse: true});
+    if (playerMedal && (playerMedal.times === -1 || playerMedal.times > new Date().getTime())) {
+      medalId = playerMedal.propId;
+    }
+
+    // 获取用户头像框
+    const playerHeadBorder = await PlayerHeadBorder.findOne({playerId: newJoinPlayer._id, isUse: true});
+    if (playerHeadBorder && (playerHeadBorder.times === -1 || playerHeadBorder.times > new Date().getTime())) {
+      headerBorderId = playerHeadBorder.propId;
+    }
+
+    // 获取用户表情
+    const playerEmojis = await PlayerProp.find({playerId: newJoinPlayer._id, propType: shopPropType.emoji});
+    for (let i = 0; i < playerEmojis.length; i++) {
+      const playerEmoji = playerEmojis[i];
+      if (playerEmoji && (playerEmoji.times === -1 || playerEmoji.times > new Date().getTime())) {
+        emojiIds.push(playerEmoji.propId);
+      }
+    }
+
+    const newModel = {...newJoinPlayer.model, medalId, headerBorderId, emojiIds};
+    const index = this.players.findIndex(p => p && !p.isRobot());
     return {
       _id: this._id,
+      startIndex: index,
       index: this.indexOf(newJoinPlayer),
-      model: newJoinPlayer.model,
+      model: newModel,
+      medalId,
+      headerBorderId,
+      emojiIds,
       ip: newJoinPlayer.getIpAddress(),
       location: newJoinPlayer.location,
       owner: this.ownerId,
@@ -612,9 +651,16 @@ class Room extends RoomBase {
   }
 
   async announcePlayerJoin(newJoinPlayer) {
+    if (this.isPublic) {
+      // 记录用户正在对局中
+      const playerModel = await service.playerService.getPlayerModel(newJoinPlayer._id);
+      playerModel.isGame = true;
+      playerModel.gameTime = new Date();
+      await playerModel.save();
+    }
+
     this.broadcast('room/joinReply', {ok: true, data: await this.joinMessageFor(newJoinPlayer)});
     this.joinRoomPlayers.push(newJoinPlayer._id.toString());
-    console.warn("joinRoomPlayers-%s", JSON.stringify(this.joinRoomPlayers));
 
     for (const alreadyInRoomPlayer of this.players
       .map((p, index) => {
@@ -719,6 +765,10 @@ class Room extends RoomBase {
     await this.recordDrawGameScore()
     this.dissolveReqInfo = [];
     const allOverMessage = this.allOverMessage()
+    allOverMessage.location = "pcmj.room";
+
+    // @ts-ignore
+    await this.redisClient.hdelAsync("canJoinRooms", this._id);
 
     clearTimeout(this.dissolveTimeout)
     this.roomState = ''
@@ -752,15 +802,15 @@ class Room extends RoomBase {
     }
 
     this.broadcast('room/playerDisconnect', {ok: true, data: {index: this.players.indexOf(player)}}, player.msgDispatcher)
-    this.removePlayer(player)
-    this.disconnected.push([player._id, index])
+    // this.removePlayer(player)
+    // this.disconnected.push([player._id, index])
     this.emit('disconnect', p._id)
   }
 
   removeReadyPlayer(playerId: string) {
-    const index = this.readyPlayers.indexOf(playerId)
-    if (index >= 0) {
-      this.readyPlayers.splice(index, 1)
+    const index = this.readyPlayers.findIndex(_id => _id.toString() === playerId);
+    if (index !== -1) {
+      this.readyPlayers.splice(index, 1);
       return true
     }
     return false
@@ -805,7 +855,7 @@ class Room extends RoomBase {
     //     this.players[i] = null
     //   }
     // }
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: p._id, roomId: this._id}})
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: p._id, roomId: this._id, location: "pcmj.room"}})
     this.removeReadyPlayer(p._id.toString())
     this.clearScore(player._id.toString())
 
@@ -867,7 +917,7 @@ class Room extends RoomBase {
 
   onRequestDissolve(player) {
     if (Date.now() - this.dissolveTime < 60 * 1000) {
-      player.sendMessage('game/showInfo', {ok: false, info: TianleErrorCode.dissolveInsufficient})
+      player.sendMessage('room/dissolveReq', {ok: false, info: TianleErrorCode.dissolveInsufficient})
       return
     }
     const dissolveInfo = this.getDissolvePlayerInfo(player);
@@ -1029,6 +1079,7 @@ class Room extends RoomBase {
     }
     this.sortPlayer(nextZhuang)
     this.clearReady()
+    await this.charge();
     await this.delPlayerBless();
     this.readyPlayers = [];
     this.joinRoomPlayers = [];
@@ -1084,98 +1135,6 @@ class Room extends RoomBase {
     }
 
     return message;
-  }
-
-  async chargeCreator() {
-    if (!this.charged) {
-      this.charged = true
-      const createRoomNeed = this.privateRoomFee(this.rule)
-      const creatorId = this.creator.model._id
-      const playerManager = PlayerManager.getInstance()
-
-      const payee = playerManager.getPlayer(creatorId) || this.creator
-
-      payee.model.gem -= createRoomNeed
-      payee.sendMessage('resource/createRoomUsedGem', {ok: true, data: {
-          createRoomNeed,
-        }})
-
-      PlayerModel.update({_id: creatorId},
-        {
-          $inc: {
-            gem: -createRoomNeed,
-          },
-        }, err => {
-          if (err) {
-            logger.error(err)
-          }
-        })
-      new ConsumeRecord({player: creatorId, gem: createRoomNeed}).save()
-      new DiamondRecord({
-        player: this.creator.model._id,
-        amount: -createRoomNeed,
-        residue: this.creator.model.gem,
-        type: ConsumeLogType.chargeRoomFeeByCreator,
-        note: ""
-      }).save();
-    }
-  }
-
-  async chargeAllPlayers() {
-    if (!this.charged) {
-      this.charged = true
-      const createRoomNeed = this.privateRoomFee(this.rule)
-      const playerManager = PlayerManager.getInstance()
-
-      const share = Math.ceil(createRoomNeed / this.capacity)
-      for (const player of this.snapshot) {
-
-        const payee = playerManager.getPlayer(player.model._id) || player
-
-        payee.model.gem -= share
-        payee.sendMessage('resource/createRoomUsedGem', {ok: true, data: {
-            createRoomNeed: share
-          }})
-        PlayerModel.update({_id: player.model._id},
-          {
-            $inc: {
-              gem: -share,
-            },
-          }, err => {
-            if (err) {
-              logger.error(player.model, err)
-            }
-          })
-
-        new ConsumeRecord({player: player.model._id, gem: share}).save()
-        new DiamondRecord({
-          player: player.model._id,
-          amount: -share,
-          residue: player.model.gem,
-          type: ConsumeLogType.chargeRoomFeeByShare,
-          note: ""
-        }).save();
-      }
-    }
-  }
-
-  async chargeClubOwner() {
-    const fee = Room.roomFee(this.rule)
-
-    PlayerModel.update({_id: this.clubOwner._id},
-      {
-        $inc: {
-          gem: -fee,
-        },
-      }, err => {
-        if (err) {
-          logger.error(this.clubOwner._id, err)
-        }
-      })
-
-    this.clubOwner.sendMessage('resource/createRoomUsedGem', {ok: true, data: {
-        createRoomNeed: fee
-      }})
   }
 
   sortPlayer(zhuang) {

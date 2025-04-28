@@ -70,7 +70,7 @@ export class PublicRoom extends Room {
     this.removePlayer(player)
     this.removeReadyPlayer(player.model._id.toString())
     player.room = null
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id}})
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id, location: "mj.publicRoom"}})
     this.clearScore(player.model._id.toString())
 
     return true
@@ -109,7 +109,7 @@ export class PublicRoom extends Room {
 
     if (findPlayer) {
       findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
-      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold}})
+      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold, redPocket: findPlayer.model.redPocket}})
     }
   }
 
@@ -146,7 +146,7 @@ export class PublicRoom extends Room {
     // 检查金豆
     const resp = await service.gameConfig.rubyRequired(thePlayer.model._id, this.gameRule);
     if (resp.isNeedRuby) {
-      return thePlayer.sendMessage('room/joinReply', {ok: false, info: TianleErrorCode.goldInsufficient})
+      return this.broadcast('room/joinReply', {ok: false, info: TianleErrorCode.goldInsufficient, data: {index: thePlayer.seatIndex}})
     }
     return super.nextGame(thePlayer);
   }
@@ -228,7 +228,7 @@ export class PublicRoom extends Room {
         const currency = await this.PlayerGoldCurrency(p._id);
         await service.playerService.logGoldConsume(p._id, ConsumeLogType.payGameFee, -conf.roomRate, currency, `扣除房费`);
         // 通知客户端更新金豆
-        this.updateResource2Client(p)
+        await this.updateResource2Client(p)
       }
     }
   }

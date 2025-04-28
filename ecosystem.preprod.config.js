@@ -42,8 +42,8 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm Z"
     },
     {
-      name: "tianle-guobiao-server",
-      script: "dist/backend.guobiao.js",
+      name: "tianle-redpocket-server",
+      script: "dist/backend.redpocket.js",
       instances: 1,
       instance_var: 'INSTANCE_ID',
       env: {
@@ -100,6 +100,20 @@ module.exports = {
     {
       name: "tianle-zhadan-server",
       script: "dist/backend.zhadan.js",
+      instances: 1,
+      instance_var: 'INSTANCE_ID',
+      env: {
+        COMMON_VARIABLE: "true",
+        NODE_ENV: "preprod",
+      },
+      env_production: {
+        NODE_ENV: "production"
+      },
+      log_date_format: "YYYY-MM-DD HH:mm Z"
+    },
+    {
+      name: "tianle-guandan-server",
+      script: "dist/backend.guandan.js",
       instances: 1,
       instance_var: 'INSTANCE_ID',
       env: {

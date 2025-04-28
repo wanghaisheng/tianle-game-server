@@ -97,15 +97,19 @@ export class CardMap {
     for (let i = 0; i < this.cardMap[16].length; i++) {
       jokerList.push(this.cardMap[16][i], this.cardMap[17][i]);
     }
+
     const result = [];
     for (const count of countList) {
       if (count > 0) {
         result.push(jokerList.slice(0, count));
-        this.delCard(jokerList.slice(0, count));
+        jokerList.splice(0, count);
+        // this.delCard(jokerList.slice(0, count));
       } else {
         result.push([]);
       }
     }
+
+    // console.warn("jokerList %s result %s", JSON.stringify(jokerList), JSON.stringify(result));
     return result;
   }
 
@@ -245,7 +249,7 @@ class CardManager {
     const replace = [];
     cards.forEach((value, index) => {
       if (value.value === 3) {
-        replace.push(index)
+        replace.push(index);
       }
     });
     let addJoker = 0;
@@ -276,6 +280,7 @@ class CardManager {
         cardMap[card.value] = [{ card, index: i } ];
       }
     }
+    // console.warn("cardMap %s", JSON.stringify(cardMap));
     return new CardMap(cardMap);
   }
 
@@ -297,6 +302,8 @@ class CardManager {
       // 一半概率发炸弹
       return Math.random() < 0.5;
     }
+
+    // 每个人先分配1-2个炸弹
     for (let j = 0; j < 2; j++) {
       for (let i = 0; i < playerCards.length; i++) {
         cards = playerCards[i];
@@ -316,9 +323,9 @@ class CardManager {
     for (let i = 0; i < playerCards.length; i++) {
       cards = playerCards[i];
       if (jokerList[i].length > 0) {
-        // const jokerCard = cardMap.selectJoker(jokerCount[i]);
         cards.push(...jokerList[i]);
       }
+
       // 检查剩下的凑成 27 张
       if (cards.length !== 27) {
         // 不要再抽鬼牌
@@ -326,6 +333,8 @@ class CardManager {
         if (resultCards.length !== 27 - cards.length) {
           throw new Error('invalid card')
         }
+
+        // console.warn("resultCards %s", JSON.stringify(resultCards));
         cards.push(...resultCards);
       }
     }

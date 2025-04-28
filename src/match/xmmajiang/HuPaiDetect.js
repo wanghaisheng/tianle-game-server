@@ -1,6 +1,5 @@
 import Enums from './enums';
 import {manager} from "./cardManager";
-import {LotterySource} from "@fm/common/constants";
 
 const cloneHuResult = function (obj) {
   const option = Object.assign({}, obj)
@@ -753,7 +752,7 @@ const HuPaiDetect = {
     const {caiShen} = sourceCountMap
     let color = 0
     const each = (card) => {
-      if (card == caiShen) return
+      if (card === caiShen) return
       if (card < Enums.dong) {
         color = 1
       }

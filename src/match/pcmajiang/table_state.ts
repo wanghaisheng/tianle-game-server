@@ -23,6 +23,8 @@ import {GameType, TianleErrorCode} from "@fm/common/constants";
 import Player from "../../database/models/player";
 import GameCategory from "../../database/models/gameCategory";
 import CombatGain from "../../database/models/combatGain";
+import * as config from "../../config"
+import RoomTimeRecord from "../../database/models/roomTimeRecord";
 
 const stateWaitDa = 1
 const stateWaitAction = 2
@@ -524,6 +526,8 @@ class TableState implements Serializable {
       this.testMoCards = payload.moCards;
     }
 
+    const zhuangIndex = 0;
+
     // 判断麻将补助是否开房
     // const isMajongOpen = await service.utils.getGlobalConfigByName("majiangHelp");
     // if (!this.room.rule.isPublic && Number(isMajongOpen) === 1) await this.checkPlayerHelper();
@@ -545,7 +549,7 @@ class TableState implements Serializable {
         }
       }
 
-      p.onShuffle(restCards, this.caishen, this.restJushu, cards13, i, this.room.game.juIndex, needShuffle)
+      p.onShuffle(restCards, this.caishen, this.restJushu, cards13, i, this.room.game.juIndex, needShuffle, zhuangIndex)
     }
 
     //设置对局已经开始
@@ -716,7 +720,7 @@ class TableState implements Serializable {
       }
 
       // 一炮多响（金豆房）
-      if (this.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+      if (this.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
         this.manyHuPlayers.push(player._id.toString());
         this.setManyAction(player, Enums.peng);
 
@@ -820,7 +824,7 @@ class TableState implements Serializable {
       }
 
       // 一炮多响(金豆房)
-      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
         this.manyHuPlayers.push(player._id.toString());
         this.setManyAction(player, Enums.gang);
         // console.warn("player index-%s choice gang card-%s manyHuArray-%s action-%s", this.atIndex(player), card, JSON.stringify(this.manyHuArray), Enums.gang);
@@ -992,7 +996,7 @@ class TableState implements Serializable {
 
       if (isJiePao) {
         // 一炮多响(金豆房)
-        if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+        if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
           this.manyHuPlayers.push(player._id.toString());
           this.setManyAction(player, Enums.hu);
           player.sendMessage("game/chooseMultiple", {
@@ -1721,7 +1725,18 @@ class TableState implements Serializable {
 
   listenRoom(room) {
     room.on('reconnect', this.onReconnect = async (playerMsgDispatcher, index) => {
-      // console.warn("room reconnect")
+      let m = await RoomTimeRecord.findOne({ roomId: this.room._id });
+      if (m) {
+        const currentTime = new Date().getTime();
+        const startTime = Date.parse(m.createAt);
+
+        console.warn("startTime %s currentTime %s", startTime, currentTime);
+
+        if (currentTime - startTime > config.game.dissolveTime) {
+          return await this.room.forceDissolve();
+        }
+      }
+
       const player = this.players[index]
       player.onDeposit = false;
       player.reconnect(playerMsgDispatcher)
@@ -2108,10 +2123,6 @@ class TableState implements Serializable {
 
     const xiajia = this.players[(index + 1) % this.players.length]
 
-    if (xiajia.contacted(this.lastDa) < 2) {
-      check = xiajia.checkChi(card, check)
-    }
-
     for (let j = 1; j < this.players.length; j++) {
       const i = (index + j) % this.players.length
       const p = this.players[i]
@@ -2195,7 +2206,7 @@ class TableState implements Serializable {
 
   async onPlayerGuo(player, playTurn, playCard) {
     // 一炮多响(金豆房)
-    if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+    if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
       this.manyHuPlayers.push(player._id.toString());
       this.setManyAction(player, Enums.guo);
 

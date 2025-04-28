@@ -5,6 +5,7 @@ import Card, {CardType} from "./card"
 import {groupBy, IPattern, PatterNames} from "./patterns/base"
 import PlayerState from "./player_state"
 import Table, {Team} from "./table"
+import Enums from "./enums";
 
 function once(target, propertyKey: string, descriptor: PropertyDescriptor) {
   const originCall = descriptor.value
@@ -26,81 +27,46 @@ export default class NormalTable extends Table {
   private nextAction: () => void = null
 
   name() {
-    return "shuangq"
+    return "zhadan"
   }
 
-  async start() {
-    console.log('start game')
-    if (this.room.gameRule.isPublic) {
-      // 金豆房发牌
-      await this.publicRoomFapai();
-    } else {
-      await this.fapai();
-    }
-    // await this.publicRoomFapai();
+  async start(payload) {
+    await this.fapai(payload);
     if (!this.selectFriendCard(this.players[0].cards)) {
-      const player0 = this.players[0]
-      const player1 = this.players[1]
+      const player0 = this.players[0];
+      const player1 = this.players[1];
 
-      const card0 = player0.cards.pop()
-      const card1 = player1.cards.pop()
+      const card0 = player0.cards.pop();
+      const card1 = player1.cards.pop();
 
-      player0.cards.push(card1)
-      player1.cards.push(card0)
+      player0.cards.push(card1);
+      player1.cards.push(card0);
     }
 
-    await this.fourJokersReward();
-
-    this.players.forEach((p, i) => {
-        p.onShuffle(0, this.restJushu, p.cards, i, this.room.game.juIndex, this.room.shuffleData.length > 0);
-      });
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      // 判断是否使用记牌器
+      const cardRecorderStatus = await this.getCardRecorder(p);
+      p.onShuffle(0, this.restJushu, p.cards, i, this.room.game.juIndex, this.room.shuffleData.length > 0, cardRecorderStatus);
+    }
 
     const shuffleData = this.room.shuffleData.map(x => {
       const p = this.players.find(y => y.model._id === x)
       return p.index
     })
     this.shuffleDelayTime = Date.now() + this.room.shuffleData.length * 5000
-    this.room.broadcast('game/shuffleData', {shuffleData})
+    this.room.broadcast('game/shuffleData', {ok: true, data: {shuffleData}})
     this.status.current.seatIndex = -1
-    // console.log('fai pa seatIndex -1');
     // 金豆房扣除开局金豆
     if (this.room.gameRule.isPublic) {
       await this.room.payRubyForStart();
     }
-    this.broadcastModeRequest();
-    // 记录幸运星
-    for (const p of this.players) {
-      if (p.cards.filter(value => value.value === 8).length === 8) {
-        // 有8个8
-        if (this.rule.jokerCount === 0) {
-          // 一级
-          service.medal.updateLuckyMedal(p.model._id, p.model.shortId, 1, 0, GameType.zd).then();
-        } else if (this.rule.jokerCount === 4) {
-          // 4王
-          if (p.cards.filter(value => value.type === CardType.Joker).length !== 4) {
-            // 没有4王
-            continue;
-          }
-          service.medal.updateLuckyMedal(p.model._id, p.model.shortId, 2, 4, GameType.zd).then();
-        } else if (this.rule.jokerCount === 6) {
-          // 6王
-          if (p.cards.filter(value => value.type === CardType.Joker).length !== 6) {
-            // 没有6王
-            continue;
-          }
-          if (this.rule.ro.maxJokerBomb === 16) {
-            // 最多 16分
-            service.medal.updateLuckyMedal(p.model._id, p.model.shortId, 3, 6, GameType.zd).then();
-          } else if (this.rule.ro.maxJokerBomb === 32) {
-            // 最多 32分
-            service.medal.updateLuckyMedal(p.model._id, p.model.shortId, 4, 6, GameType.zd).then();
-          } else if (this.rule.ro.maxJokerBomb === 64) {
-            // 最多 64分
-            service.medal.updateLuckyMedal(p.model._id, p.model.shortId, 4, 6, GameType.zd).then();
-          }
-        }
-      }
+    await this.broadcastModeRequest();
+
+    if (!this.room.robotManager) {
+      await this.room.init();
     }
+
     await this.room.robotManager.setCardReady();
   }
 
@@ -114,15 +80,26 @@ export default class NormalTable extends Table {
     return super.toJSON()
   }
 
-  private broadcastModeRequest() {
+  private async broadcastModeRequest() {
     this.tableState = 'selectMode';
     for (const player of this.players) {
       if (player.mode === 'unknown') {
+        // if (this.room.isPublic) {
+        //   await this.onSelectMode(player, "teamwork");
+        //   this.room.emit('selectMode', {});
+        // } else {
+        //   player.msgDispatcher.on('game/selectMode', async ({mode}) => {
+        //     await this.onSelectMode(player, mode);
+        //     this.room.emit('selectMode', {});
+        //   })
+        //   player.sendMessage('game/startSelectMode', {ok: true, data: {}})
+        // }
+
         player.msgDispatcher.on('game/selectMode', async ({mode}) => {
-          await this.onSelectMode(player, mode)
+          await this.onSelectMode(player, mode);
           this.room.emit('selectMode', {});
         })
-        player.sendMessage('game/startSelectMode', {})
+        player.sendMessage('game/startSelectMode', {ok: true, data: {}})
       }
     }
     this.autoModeTimeFunc()
@@ -177,10 +154,10 @@ export default class NormalTable extends Table {
     super.listenPlayer(player)
     this.listenerOn.push('game/selectMode')
 
-    player.msgDispatcher.on('game/selectMode', async ({mode}) => {
-      await this.onSelectMode(player, mode)
-      this.room.emit('selectMode', {});
-    })
+    // player.msgDispatcher.on('game/selectMode', async ({mode}) => {
+    //   await this.onSelectMode(player, mode)
+    //   this.room.emit('selectMode', {});
+    // })
   }
 
   async canStartGame(): Promise<boolean> {
@@ -207,26 +184,31 @@ export default class NormalTable extends Table {
         break;
       }
     }
-    this.room.broadcast('game/gameMode', {
-      mode: 'solo',
-      soloPlayer: startPlayerIndex,
-      soloPlayerName: this.players[startPlayerIndex].model.name
-    })
+    this.room.broadcast('game/gameMode', {ok: true, data: {
+        mode: 'solo',
+        soloPlayer: startPlayerIndex,
+        soloPlayerName: this.players[startPlayerIndex].model.nickname
+      }})
     this.setFirstDa(startPlayerIndex)
     this.players.forEach(p => p.team = Team.AwayTeam)
     this.players[startPlayerIndex].team = Team.HomeTeam
     this.mode = 'solo'
 
-    this.broadcastFirstDa()
+    const firstDaFunc = async() => {
+      this.broadcastFirstDa()
+    }
+
+    setTimeout(firstDaFunc, 1000);
   }
 
   broadcastFirstDa() {
-    this.room.broadcast('game/startDa', {index: this.currentPlayerStep})
+    this.room.broadcast('game/startDa', {ok: true, data: {index: this.currentPlayerStep}})
   }
 
   private beTeamMate(team: PlayerState[]) {
     team[0].teamMate = team[1].index
     team[1].teamMate = team[0].index
+    this.room.broadcast("game/matchFriends", {ok: true, data: {teamMate: [team[1].index, team[0].index], team: team[0].team}})
   }
 
   setTeamMate() {
@@ -236,7 +218,8 @@ export default class NormalTable extends Table {
 
   startTeamworkGame() {
     const zhuang = this.players[0]
-    this.friendCard = this.selectFriendCard(zhuang.cards)
+    this.friendCard = this.selectFriendCard(zhuang.cards);
+    this.zhuang.recorder.recordUserEvent(null, 'setFriendCard', [this.friendCard]);
 
     for (const p of this.players) {
       if (p.cards.find(c => Card.compare(this.friendCard, c) === 0)) {
@@ -249,7 +232,7 @@ export default class NormalTable extends Table {
 
     this.setFirstDa(0)
     this.mode = 'teamwork'
-    this.room.broadcast('game/gameMode', {mode: 'teamwork', friendCard: this.friendCard})
+    this.room.broadcast('game/gameMode', {ok: true, data: {mode: 'teamwork', friendCard: this.friendCard}})
     this.broadcastFirstDa()
   }
 
@@ -262,8 +245,9 @@ export default class NormalTable extends Table {
       return singleCarsGroup[0][0]
     }
 
-    return singleCarsGroup.filter(grp => grp[0].type !== CardType.Joker)[0][0]
+    const singleCards = singleCarsGroup.filter(grp => grp[0].type !== CardType.Joker);
 
+    return singleCards.length ? singleCards[0][0] : null;
   }
 
   isGameOver(): boolean {
@@ -286,33 +270,33 @@ export default class NormalTable extends Table {
     if (this.room.gameRule.isPublic) {
       return this.rubyRoomBoomScorer(bomb);
     }
-    if (!bomb) return 0
+    if (!bomb) return 0;
 
-    if (bomb.name !== PatterNames.bomb) return 0
-    let bombLen = bomb.cards.length
+    if (bomb.name !== PatterNames.bomb) return 0;
+    let bombLen = bomb.cards.length;
 
     if (bomb.cards.every(c => c.type === CardType.Joker)) {
-      const jokerBombScore = Math.pow(2, bombLen)
+      const jokerBombScore = Math.pow(2, bombLen);
       if (this.rule.ro.maxJokerBomb > 16) {
-        return Math.min(this.rule.ro.maxJokerBomb, jokerBombScore)
+        return Math.min(this.rule.ro.maxJokerBomb, jokerBombScore);
       }
-      return 16
+      return 16;
     }
 
     if (bomb.cards.some(c => c.value === 2)) {
-      bombLen += 1
+      bombLen += 1;
     }
 
-    if (bombLen < 5) return 0
+    if (bombLen < 5) return 0;
 
     if (this && this.rule.ro.maxBombLevel && bombLen > this.rule.ro.maxBombLevel) {
-      bombLen = this.rule.ro.maxBombLevel
+      bombLen = this.rule.ro.maxBombLevel;
     }
     if (bombLen > 13) {
       bombLen = 13;
     }
 
-    return Math.pow(2, bombLen - 5)
+    return Math.pow(2, bombLen - 5);
   }
 
   // 金豆房炸弹计分
@@ -323,22 +307,13 @@ export default class NormalTable extends Table {
     let bombLen = bomb.cards.length
 
     if (bomb.cards.every(c => c.type === CardType.Joker)) {
-      return Math.pow(2, bombLen)
-      // if (this.rule.ro.maxJokerBomb > 16) {
-      //   return Math.min(this.rule.ro.maxJokerBomb, jokerBombScore)
-      // }
-      // return 16
+      return Math.pow(2, bombLen);
     }
     if (bomb.cards.some(c => c.value === 2)) {
-      bombLen += 1
+      bombLen += 1;
     }
-    if (bombLen < 5) return 0
-    // if (this && this.rule.ro.maxBombLevel && bombLen > this.rule.ro.maxBombLevel) {
-    //   bombLen = this.rule.ro.maxBombLevel
-    // }
-    // if (bombLen > 13) {
-    //   bombLen = 13;
-    // }
+    if (bombLen < 5) return 0;
+
     return Math.pow(2, bombLen - 5)
   }
 
@@ -350,16 +325,18 @@ export default class NormalTable extends Table {
     }
   }
 
-  reconnectContent(index, reconnectPlayer: PlayerState) {
+  async reconnectContent(index, reconnectPlayer: PlayerState) {
     const stateData = this.stateData
     const juIndex = this.room.game.juIndex
+    const status = [];
 
-    const status = this.players.map(player => {
-      return player === reconnectPlayer ? {
-        ...player.statusForSelf(this),
-        teamMateCards: this.teamMateCards(player)
-      } : player.statusForOther(this)
-    })
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i];
+      status.push(p._id.toString() === reconnectPlayer._id.toString() ? {
+          ...await p.statusForSelf(this),
+          teamMateCards: this.teamMateCards(p)
+        } : await p.statusForOther(this));
+    }
 
     const soloPlayer = this.players[this.soloPlayerIndex]
 
@@ -374,9 +351,10 @@ export default class NormalTable extends Table {
       mode: this.mode,
       friendCard: this.friendCard,
       soloPlayerIndex: this.soloPlayerIndex,
-      soloPlayerName: soloPlayer && soloPlayer.model.name,
+      soloPlayerName: soloPlayer && soloPlayer.model.nickname,
       currentPlayer: this.status.current.seatIndex,
       lastPattern: this.status.lastPattern,
+      isGameRunning: this.state === 'gameOver',
       lastIndex: this.status.lastIndex,
       fen: this.status.fen,
       from: this.status.from,
@@ -399,10 +377,10 @@ export default class NormalTable extends Table {
     this.players.forEach(ps => {
       ps.foundFriend = true
     })
-    this.room.broadcast('game/showFriend', {
-      homeTeam: this.homeTeamPlayers().map(p => p.index),
-      awayTeam: this.awayTeamPlayers().map(p => p.index)
-    })
+    this.room.broadcast('game/showFriend', {ok: true, data: {
+        homeTeam: this.homeTeamPlayers().map(p => p.index),
+        awayTeam: this.awayTeamPlayers().map(p => p.index)
+      }})
   }
 
   daPai(player: PlayerState, cards: Card[], pattern: IPattern, onDeposit?) {
@@ -476,8 +454,7 @@ export default class NormalTable extends Table {
         }
       }
     } else {
-      const loser = this.homeTeamPlayers()[0]
-
+      const loser = this.homeTeamPlayers()[0];
       for (const winner of this.awayTeamPlayers()) {
         let allBombScore = winner.bombScore(this.bombScorer)
 
@@ -491,6 +468,7 @@ export default class NormalTable extends Table {
   }
 
   async gameOver() {
+    // console.warn("gameOver state %s", this.state);
     if (this.state === 'gameOver') {
       return
     }
@@ -518,6 +496,7 @@ export default class NormalTable extends Table {
         index: p.index,
         score: p.balance,
         detail: p.detailBalance,
+        winOrder: p.winOrder,
         mode: p.mode,
         // 是否破产
         isBroke: p.isBroke,
@@ -533,15 +512,15 @@ export default class NormalTable extends Table {
       isPublic: this.room.isPublic,
       ruleType: this.rule.ruleType,
       juIndex: this.room.game.juIndex,
+      gameType: GameType.zd,
       mode: this.mode,
       homeTeam: this.homeTeamPlayers().map(p => p.index),
       awayTeam: this.awayTeamPlayers().map(p => p.index),
       creator: this.room.creator.model._id,
     }
-    this.room.broadcast('game/game-over', gameOverMsg)
+    this.room.broadcast('game/gameOverReply', {ok: true, data: gameOverMsg})
     this.stateData.gameOver = gameOverMsg
-    const firstPlayer = this.players.slice()
-      .sort((p1, p2) => p1.winOrder - p2.winOrder)[0]
+    const firstPlayer = this.players.slice().sort((p1, p2) => p1.winOrder - p2.winOrder)[0]
     await this.roomGameOver(states, firstPlayer._id)
   }
 
@@ -559,8 +538,6 @@ export default class NormalTable extends Table {
     await this.getBigWinner();
   }
   async getBigWinner() {
-    let winner = [];
-    let tempScore = 0;
     // 将分数 * 倍率
     const conf = await service.gameConfig.getPublicRoomCategoryByCategory(this.room.gameRule.categoryId);
     let times = 1;
@@ -568,60 +545,93 @@ export default class NormalTable extends Table {
       // 配置失败
       console.error('invalid room level');
     } else {
-      times = conf.minScore;
+      times = conf.base * conf.Ante;
     }
     let winRuby = 0;
     let lostRuby = 0;
+    let maxBalance = 0;
+    let maxLostBalance = 0;
     const winnerList = [];
+    const lostList = [];
     for (let i = 0; i < this.players.length; i ++) {
-      const p = this.players[i]
+      const p = this.players[i];
       if (p) {
         // 基础倍率
-        // 先扣，再加
+        console.warn("balance %s base %s bomb %s", p.balance, p.detailBalance['base'], p.detailBalance['joker']);
         p.balance -= p.detailBalance['base'];
         p.balance *= times;
-        p.detailBalance['base'] *= times * 10;
+        p.detailBalance['base'] *= times;
         p.balance += p.detailBalance['base'];
         p.detailBalance['joker'] *= times;
         p.detailBalance['bomb'] *= times;
         p.detailBalance['noLoss'] *= times;
         if (p.balance > 0) {
-          winRuby += p.balance;
-          winnerList.push(p);
-        } else {
-          const model = await service.playerService.getPlayerModel(p.model._id);
-          if (model.ruby < -p.balance) {
-            p.balance = -model.ruby;
-            if (!this.room.preventTimes[p.model.shortId]) {
-              // 没有免输次数，真破产了
-              p.isBroke = true;
-            } else {
-              p.isBroke = false;
-              p.detailBalance['noLoss'] = model.ruby;
-            }
+          const currency = await this.PlayerGoldCurrency(p._id);
+          if (p.balance > currency) {
+            console.warn("winner balance-%s currency-%s", p.balance, currency);
+            p.balance = currency;
           }
+
+          winnerList.push(p);
+          winRuby += p.balance;
+          maxBalance += p.balance;
+        } else {
+          const currency = await this.PlayerGoldCurrency(p._id);
+          if (currency < -p.balance) {
+            console.warn("loser balance-%s currency-%s", p.balance, currency);
+            p.balance = -currency;
+          }
+
+          lostList.push(p);
+          maxLostBalance += p.balance;
           lostRuby += p.balance;
         }
-        const score = p.balance || 0;
-        if (tempScore === score) {
-          winner.push(p.model.shortId)
-        }
-        if (tempScore < score) {
-          tempScore = score;
-          winner = [p.model.shortId]
-        }
       }
     }
-    console.log('win ruby', winRuby, 'lost ruby', lostRuby);
-    // 平分奖励
+
+    if (winRuby > -lostRuby) {
+      winRuby = -lostRuby;
+    }
+
+    if (-lostRuby > winRuby) {
+      lostRuby = -winRuby;
+    }
+
+    if (isNaN(winRuby)) {
+      winRuby = 0;
+    }
+    if (isNaN(lostRuby)) {
+      lostRuby = 0;
+    }
+
+    console.log('win ruby', winRuby, 'lost ruby', lostRuby, 'maxBalance', maxBalance, 'maxLostBalance', maxLostBalance);
+
     if (winRuby > 0) {
       for (const p of winnerList) {
-        p.balance = Math.floor(p.balance / winRuby * lostRuby * -1);
-        console.log('after balance', p.balance, p.model.shortId)
+        const oldBalance = p.balance;
+        p.balance = Math.floor(p.balance / maxBalance * winRuby);
+        console.log('winner after balance %s oldBalance %s shortId %s', p.balance, oldBalance, p.model.shortId)
       }
-      tempScore = Math.floor(tempScore / winRuby * lostRuby * -1);
     }
-    return { winner, score: tempScore };
+
+    if (lostRuby < 0) {
+      for (const p of lostList) {
+        const oldBalance = p.balance;
+        p.balance = Math.floor(p.balance / maxLostBalance * lostRuby);
+        console.log('lost after balance %s oldBalance %s shortId %s', p.balance, oldBalance, p.model.shortId)
+      }
+    }
+  }
+
+  // 根据币种类型获取币种余额
+  async PlayerGoldCurrency(playerId) {
+    const model = await service.playerService.getPlayerModel(playerId);
+
+    if (this.rule.currency === Enums.goldCurrency) {
+      return model.gold;
+    }
+
+    return model.tlGold;
   }
 
   getPlayerByShortId(shortId) {

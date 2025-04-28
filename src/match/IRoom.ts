@@ -1,39 +1,33 @@
 import {ConsumeLogType, GameType, playerAttributes, TianleErrorCode} from "@fm/common/constants";
 import * as EventEmitter from 'events'
-import * as lodash from 'lodash'
 import * as logger from 'winston'
 import * as config from "../config";
-import Club from '../database/models/club'
-import ClubGoldRecord from "../database/models/clubGoldRecord";
-import ClubMember from '../database/models/clubMember'
-import ConsumeRecord from '../database/models/consumeRecord'
 import GoodsLive from "../database/models/goodsLive";
 import LuckyBless from "../database/models/luckyBless";
 import Player from "../database/models/player";
 import PlayerModel from '../database/models/player'
-import {RedPocketRecordModel} from "../database/models/redPocketRecord";
 import RoomRecord from "../database/models/roomRecord";
 import {service} from "../service/importService";
 import { IGame, IRoom, ITable, SimplePlayer } from './interfaces';
 import {once} from "./onceDecorator"
 import {autoSerialize, Serializable, serialize, serializeHelp} from "./serializeDecorator"
 import {eqlModelId} from "./pcmajiang/modelId";
-import Enums from "./majiang/enums";
+import createClient from "../utils/redis";
+import RoomTimeRecord from "../database/models/roomTimeRecord";
+import {toBuffer} from "./messageBus";
 
-export const playerInClub = async (clubShortId: string, playerId: string) => {
-  if (!clubShortId) {
-    return false
-  }
-  const club = await Club.findOne({shortId: clubShortId})
-  if (!club) {
-    return false
-  }
+export async function requestToUserCenter(channel, name, playerId, info) {
 
-  if (club.owner === playerId) {
-    return true;
+  const player = await Player.findOne({_id: playerId});
+
+  if (!player) {
+    return
   }
 
-  return ClubMember.findOne({club: club._id, member: playerId}).exec()
+  channel.publish(
+    `userCenter`,
+    `user.${playerId}`,
+    toBuffer({name, payload: info}))
 }
 
 export interface RedPocketConfig {
@@ -44,7 +38,6 @@ export interface RedPocketConfig {
 }
 
 export abstract class RoomBase extends EventEmitter implements IRoom, Serializable {
-
   @autoSerialize
   dissolveTime: number
 
@@ -67,6 +60,8 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
 
   @autoSerialize
   scoreMap: any
+
+  redisClient = createClient()
 
   @serialize
   gameState: ITable
@@ -143,6 +138,67 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
   @autoSerialize
   preventTimes: any = {}
 
+  @autoSerialize
+  homeTeam: any = [];
+
+  @autoSerialize
+  awayTeam: any = [];
+
+  // 队友级牌
+  @autoSerialize
+  homeTeamCard: number = -1
+
+  // 对手级牌
+  @autoSerialize
+  awayTeamCard: number = -1
+
+  // 队友上一局级牌
+  @autoSerialize
+  oldHomeTeamCard: number = -1
+
+  // 对手上一局级牌
+  @autoSerialize
+  oldAwayTeamCard: number = -1
+
+  // 本局级牌
+  currentLevelCard: number = -1
+
+  // 升级倍数
+  @autoSerialize
+  upgradeMultiple: number = 1;
+
+  // 本局升级积分
+  @autoSerialize
+  upgradeScore: number = 1;
+
+  // 赢家队伍
+  @autoSerialize
+  winTeamPlayers: any = [];
+
+  // 输家队伍
+  @autoSerialize
+  loseTeamPlayers: any = [];
+
+  // 是狗游戏已结束
+  @autoSerialize
+  isAllOver: boolean = false;
+
+  // 记录上一局的结束顺序
+  winOrderLists: any = [];
+
+  // 我方三把不过次数
+  @autoSerialize
+  homeFailCount: number = 0;
+
+  // 对手三把不过次数
+  @autoSerialize
+  awayFailCount: number = 0;
+
+  @autoSerialize
+  isWaitRecharge: boolean = false;
+  @autoSerialize
+  waitRechargeLists: any[] = [];
+
   abstract initScore(player)
 
   // 保存祈福等级
@@ -163,11 +219,11 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
 
   async setClub(clubId, clubOwner) {
     this.clubId = clubId;
-    this.clubOwner = clubOwner
+    this.clubOwner = clubOwner;
     this.clubMode = true;
   }
 
-  abstract privateRoomFee(rule: any): number
+  abstract async privateRoomFee(rule: any): Promise<number>
 
   canJoin(player) {
     if (!player) {
@@ -204,16 +260,18 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
   isReadyPlayer(playerId) {
     for (const readyPlayerId of this.readyPlayers) {
       if (readyPlayerId === playerId) {
-        return true
+        return true;
       }
     }
-    return false
+    return false;
   }
 
   async ready(player) {
     if (!player) {
       console.warn("player is disconnect");
+      return ;
     }
+
     if (this.isReadyPlayer(player._id.toString())) {
       console.warn("player is ready");
       return
@@ -258,12 +316,12 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
       console.info(`some one offline ${JSON.stringify(this.disconnected)}`);
       return;
     }
-    this.readyPlayers = this.players.filter(p => p).map(x => x._id)
-    this.playersOrder = this.players.slice()
-    this.snapshot = this.players.slice()
-    this.isPlayAgain = false
-    this.destroyOldGame()
-    await this.startNewGame(payload)
+    this.readyPlayers = this.players.filter(p => p).map(x => x._id);
+    this.playersOrder = this.players.slice();
+    this.snapshot = this.players.slice();
+    this.isPlayAgain = false;
+    this.destroyOldGame();
+    await this.startNewGame(payload);
     this.isHasRedPocket = false;
     // 保存游戏开始信息
     return service.roomRegister.saveRoomInfoToRedis(this)
@@ -277,17 +335,35 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
   }
 
   async startNewGame(payload) {
-    this.destroyOldGame()
-    const gameState = this.game.startGame(this)
-    this.gameState = gameState
-    await gameState.start(payload)
-    await this.broadcastStartGame(payload)
+    this.destroyOldGame();
+    const gameState = this.game.startGame(this);
+    this.gameState = gameState;
+    await gameState.start(payload);
+    await this.broadcastStartGame(payload);
   }
 
   async broadcastStartGame(payload) {
+    console.warn("game start ", this.gameRule.categoryId);
     let conf = await service.gameConfig.getPublicRoomCategoryByCategory(this.gameRule.categoryId);
 
+    // @ts-ignore
+    await this.redisClient.hdelAsync("canJoinRooms", this._id);
+
     const startGame = async() => {
+      let m = await RoomTimeRecord.findOne({ roomId: this._id });
+      if (m) {
+        m.juIndex = this.game.juIndex;
+        m.createAt = new Date();
+        await m.save();
+      } else {
+        await RoomTimeRecord.create({
+          roomId: this._id,
+          rule: this.gameRule,
+          category: this.gameRule.gameType,
+          juIndex: this.game.juIndex
+        })
+      }
+
       this.broadcast('room/startGame', {ok: true, data: {
           juIndex: this.game.juIndex,
           playersPosition: this.players.filter(x => x).map(x => x.model),
@@ -296,7 +372,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
         }})
     }
 
-    setTimeout(startGame, this.gameRule.type === GameType.xmmj ? 2000 : 500)
+    setTimeout(startGame, this.gameRule.gameType === GameType.xmmj ? 2000 : 500)
   }
 
   async join(newJoinPlayer) {
@@ -327,41 +403,23 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     return true
   }
 
-  joinInHalf(newJoinPlayer) {
-    if (this.gameRule.share && this.game.juIndex > 1) {
-      const fee = this.privateRoomFee(this.rule)
-      this.payUseGem(newJoinPlayer, fee, this._id, ConsumeLogType.chargeRoomFeeByShare)
-    }
-  }
-
   leave(player) {
-    // console.warn("IRoom")
-    if (!player) {
-      player.sendMessage("room/leaveReply", {ok: true, data: {}})
-      return false;
+    if (this.gameState || !player) {
+      // 游戏已开始 or 玩家不存在
+      console.debug('player is disconnect in room %s', this._id);
+      return false
     }
-
     if (this.indexOf(player) < 0) {
       return true
     }
-
-    // if (this.game.juIndex > 0 && !this.game.isAllOver()) return false
-
+    player.removeListener('disconnect', this.disconnectCallback)
     this.removePlayer(player)
-
+    this.removeOrder(player);
     player.room = null
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player.model._id, location: "IRoom"}})
+    this.removeReadyPlayer(player.model._id)
+    this.clearScore(player.model._id)
 
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player._id.toString(), roomId: this._id}})
-    this.cancelReady(player._id.toString())
-
-    this.emit('leave', {_id: player._id.toString()})
-    if (this.isEmpty()) {
-      this.emit('empty', this.disconnected);
-      this.readyPlayers = [];
-    }
-
-    this.removeReadyPlayer(player._id.toString());
-    this.clearScore(player._id.toString());
     return true
   }
 
@@ -381,9 +439,9 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
   }
 
   removeReadyPlayer(playerId: string) {
-    const index = this.readyPlayers.indexOf(playerId)
-    if (index >= 0) {
-      this.readyPlayers.splice(index, 1)
+    const index = this.readyPlayers.findIndex(_id => _id.toString() === playerId);
+    if (index !== -1) {
+      this.readyPlayers.splice(index, 1);
       return true
     }
     return false
@@ -438,31 +496,46 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
       return
     }
     for (let i = 0; i < this.players.length; i++) {
-      if (this.players[i] == null && this.playersOrder[i] == null) {
+      if (this.players[i] == null) {
         this.players[i] = player
         break
       }
     }
   }
 
-  removePlayer(leaver) {
-    const index = this.players.indexOf(leaver)
-    if (index > -1) {
-      this.players[index] = null
+  removePlayer(player) {
+    for (let i = 0; i < this.players.length; i++) {
+      // console.warn("_id1-%s, _id2-%s, status-%s", this.players[i]._id.toString(), player._id.toString(), this.players[i] && this.players[i]._id.toString() === player._id.toString());
+      if (this.players[i] && this.players[i]._id.toString() === player._id.toString()) {
+        this.players[i] = null
+        break
+      }
     }
   }
 
   // 通知其它人，有玩家加入
   async announcePlayerJoin(newJoinPlayer) {
-    this.broadcast('room/joinReply', {ok: true, data: await this.joinMessageFor(newJoinPlayer)})
-    const oldPlayer = this.players
-      .map((p, index) => {
-        return p || this.playersOrder[index]
-      })
-      .filter(x => x !== null && x._id.toString() !== newJoinPlayer._id.toString());
-    for (const alreadyInRoomPlayer of oldPlayer) {
-      alreadyInRoomPlayer.sendMessage('room/joinReply', {ok: true, data: await this.joinMessageFor(newJoinPlayer)});
+    if (this.isPublic) {
+      // 记录用户正在对局中
+      const playerModel = await service.playerService.getPlayerModel(newJoinPlayer._id);
+      playerModel.isGame = true;
+      playerModel.gameTime = new Date();
+      await playerModel.save();
     }
+
+    this.broadcast('room/joinReply', {ok: true, data: await this.joinMessageFor(newJoinPlayer)})
+
+    const joinFunc = async() => {
+      for (const alreadyInRoomPlayer of this.players
+        .map((p, index) => {
+          return p || this.playersOrder[index]
+        })
+        .filter(x => x !== null && x._id !== newJoinPlayer._id)) {
+        newJoinPlayer.sendMessage('room/joinReply', {ok: true, data: await this.joinMessageFor(alreadyInRoomPlayer)});
+      }
+    }
+
+    setTimeout(joinFunc, 100);
   }
 
   async broadcastRejoin(reconnectPlayer) {
@@ -484,107 +557,28 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     return false
   }
 
-  // 房主支付
-  async chargeCreator() {
-    if (this.charged) return
-    this.charged = true
-    const createRoomNeed = this.privateRoomFee(this.rule)
-    this.payUseGem(this.creator, createRoomNeed, this._id, ConsumeLogType.chargeRoomFeeByCreator)
-    await this.updateRoomGem({ [this.creator.model.shortId]: createRoomNeed });
-  }
-
   getPlayerById(id: string) {
     return this.players.find(p => p && p._id === id)
   }
 
-  // aa 支付房费
-  async chargeAllPlayers() {
-    if (this.charged) return
-    this.charged = true
-    const fee = this.privateRoomFee(this.rule)
-    const gemList = {};
-    for (const player of this.snapshot) {
-      gemList[player.model.shortId] = fee;
-      this.payUseGem(player, fee, this._id, ConsumeLogType.chargeRoomFeeByShare)
-    }
-    await this.updateRoomGem(gemList);
-  }
-
   // 战队主付费
   async chargeClubOwner() {
-    if (this.charged) return
-    this.charged = true
-    const fee = this.privateRoomFee(this.rule)
-    this.payUseGem(this.clubOwner, fee, this._id, ConsumeLogType.chargeRoomFeeByClubOwner)
+    if (this.charged) return;
+    this.charged = true;
+    const fee = await this.privateRoomFee(this.rule.ro);
+    this.payUseGem(this.clubOwner, fee, this._id, ConsumeLogType.chargeRoomFeeByClubOwner);
     await this.updateRoomGem({ [this.clubOwner.model.shortId]: fee });
-  }
-
-  async chargePublicPlayers() {
-    console.log('no charge for public players');
-    return;
-  }
-
-  // 赢家付
-  async chargeWinner() {
-    if (this.charged) return
-    this.charged = true
-    let payList = [];
-    let tempScore = 0;
-    for (let j = 0; j < this.players.length; j ++) {
-      const p = this.players[j];
-      if (p) {
-        const score = this.scoreMap[p.model._id] || 0;
-        if (tempScore === score) {
-          payList.push(p)
-        }
-        if (tempScore < score) {
-          tempScore = score;
-          payList = [p]
-        }
-      }
-    }
-    if (payList.length < 1) {
-      return;
-    }
-    let fee = this.privateRoomFee(this.rule)
-    fee = Math.ceil(fee / payList.length) || 1;
-    const gemList = {};
-    for (const p of payList) {
-      this.payUseGem(p, fee, this._id, ConsumeLogType.chargeRoomFeeByWinner)
-      gemList[p.model.shortId] = fee;
-    }
-    await this.updateRoomGem(gemList);
   }
 
   // 选择房费支付人
   async charge() {
     if (!config.game.useGem) {
-      // 球扣房卡
       this.charged = true;
       return;
     }
     // 战队房间都是战队主付房卡
     if (this.clubMode) {
       return this.chargeClubOwner();
-    }
-    if (this.gameRule.share) {
-      // aa 支付
-      return this.chargeAllPlayers();
-    }
-    if (this.gameRule.winnerPay) {
-      // 赢家付
-      return this.chargeWinner()
-    }
-    if (this.gameRule.creatorPay) {
-      // 房主付
-      return this.chargeCreator()
-    }
-    if (this.gameRule.clubOwnerPay) {
-      // 战队主付
-      return this.chargeClubOwner();
-    }
-    if (this.isPublic) {
-      return this.chargePublicPlayers();
     }
   }
 
@@ -638,7 +632,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     this.dissolveTime = Date.now();
     this.dissolveReqInfo.push({
       type: 'originator',
-      name: simplePlayer.model.name,
+      name: simplePlayer.model.nickname,
       _id: simplePlayer.model._id
     })
     for (let i = 0; i < this.players.length; i++) {
@@ -646,13 +640,13 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
       if (pp && pp.isRobot()) {
         this.dissolveReqInfo.push({
           type: 'offline',
-          name: pp.model.name,
+          name: pp.model.nickname,
           _id: pp.model._id
         })
       } else if (pp && pp !== simplePlayer) {
         this.dissolveReqInfo.push({
           type: 'waitConfirm',
-          name: pp.model.name,
+          name: pp.model.nickname,
           _id: pp.model._id
         })
       }
@@ -667,7 +661,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
           if (player && player.model._id === pp[0]) {
             this.dissolveReqInfo.push({
               type: 'offline',
-              name: player.model.name,
+              name: player.model.nickname,
               _id: player.model._id
             })
           }
@@ -711,15 +705,19 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     return true
   }
 
-  dissolveOverMassage(lowScoreTimes?: number) {
-    return this.allOverMessage(lowScoreTimes)
+  async dissolveOverMassage() {
+    return await this.allOverMessage()
   }
 
   @once
   async forceDissolve() {
     clearTimeout(this.autoDissolveTimer)
-    const lowScoreTimes = await this.recordDrawGameScore()
-    const allOverMessage = this.dissolveOverMassage(lowScoreTimes)
+    const allOverMessage = await this.dissolveOverMassage()
+    allOverMessage.location = "IRoom";
+
+    // @ts-ignore
+    await this.redisClient.hdelAsync("canJoinRooms", this._id);
+
     clearTimeout(this.dissolveTimeout)
     this.roomState = ''
     this.dissolveTimeout = null
@@ -773,27 +771,6 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     return true
   }
 
-  async clubOwnerdissolve() {
-    if (!this.clubOwner || this.game.juIndex >= 1) {
-      return {ok: false, roomNum: this._id}
-    }
-    if (this.autoDissolveTimer) {
-      clearTimeout(this.autoDissolveTimer)
-    }
-    this.dissolveAndDestroyTable()
-
-    this.players.forEach(player => {
-      if (player) {
-        player.sendMessage('room/dissolve', {})
-        player.sendMessage('sc/showInfo', {info: `房间【${this._id}】已被战队管理员解散`})
-        player.room = null
-      }
-    })
-    this.emit('empty', this.disconnected.map(x => x[0]))
-    this.players.fill(null)
-    return {ok: true, roomNum: this._id}
-  }
-
   async specialDissolve() {
     try {
       if (this.autoDissolveTimer) {
@@ -803,7 +780,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
       this.dissolveAndDestroyTable()
       this.players.forEach(player => {
         if (player) {
-          player.sendMessage('room/dissolve', {})
+          player.sendMessage('room/dissolve', {ok: true, data: {}})
           player.room = null
         }
       })
@@ -827,8 +804,8 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     roomCreator.sendMessage('room/dissolve', {ok: true, data: {}})
     roomCreator.room = null
     this.players.forEach(player => {
-      if (player && player !== roomCreator) {
-        player.sendMessage('room/dissolve', {})
+      if (player && player._id.toString() !== roomCreator._id.toString()) {
+        player.sendMessage('room/dissolve', {ok: true, data: {}})
         player.room = null
       }
     })
@@ -841,16 +818,31 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     const condition = {_id: player.model._id};
     const update = {$inc: {diamond: -toPay}};
     const options = {new: true};
-    const callback = (err, newDoc) => {
+    const callback = async (err, newDoc) => {
       if (err) {
         logger.error(player.model, err);
         return
       }
 
       if (newDoc) {
-        player.model.diamond = newDoc.diamond
-        // player.sendMessage('resource/createRoomUsedDiamond', {ok: true, data: {diamondFee: toPay}})
-        service.playerService.logGemConsume(player.model._id, type, -toPay, player.model.diamond, note);
+        const model = await service.playerService.getPlayerModel(player._id);
+        player.sendMessage('resource/update', {ok: true,
+          data: {
+            diamond: model.diamond,
+            gold: model.gold,
+            tlGold: model.tlGold,
+            redPocket: model.redPocket
+          }
+        })
+        await requestToUserCenter(player.channel, 'resource/update', player._id, {ok: true,
+          data: {
+            diamond: model.diamond,
+            gold: model.gold,
+            tlGold: model.tlGold,
+            redPocket: model.redPocket
+          }
+        })
+        await service.playerService.logGemConsume(player.model._id, type, -toPay, model.diamond, note);
       }
     }
 
@@ -873,7 +865,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     this.payUseGem(player, config.game.payForReshuffle, this._id, ConsumeLogType.reshuffleCard);
     player.sendMessage('room/addShuffleRely', {ok: true, data: {seatIndex: this.indexOf(player), diamondFee: config.game.payForReshuffle}})
 
-    this.updateResource2Client(player);
+    await this.updateResource2Client(player);
   }
 
   playShuffle() {
@@ -886,126 +878,6 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     const shuffleDelayTime = this.shuffleData.length * config.game.playShuffleTime + 1000;
     this.broadcast('game/shuffleData', {ok: true, data: {shuffleData, shuffleDelayTime}});
     return shuffleDelayTime;
-  }
-
-  // 进房间战队金币消耗
-  async updatePlayerClubGold() {
-    const club = this.clubId && await Club.findOne({_id: this.clubId})
-    if (!club) {
-      return
-    }
-    let goldPay;
-    let payResult;
-    let payPlayer = [];
-    // if (this.gameRule.creatorPayGold) {
-    //   // 创建者支付
-    //   payPlayer.push(this.creator.model._id);
-    // }
-    // if (this.gameRule.clubOwnerPayGold) {
-    //   // 战队主支付
-    //   payPlayer.push(this.clubOwner.model._id);
-    // }
-    if (this.gameRule.winnerPayGold) {
-      // 大赢家付金币
-      payPlayer = [];
-      let tempScore = 0;
-      for (let j = 0; j < this.snapshot.length; j ++) {
-        const p = this.snapshot[j]
-        if (p) {
-          const score = this.scoreMap[p.model._id] || 0;
-          if (tempScore === score) {
-            payPlayer.push(p.model._id)
-          }
-          if (tempScore < score) {
-            tempScore = score;
-            payPlayer = [p.model._id]
-          }
-        }
-      }
-    }
-    if (payPlayer.length > 0) {
-      goldPay = Math.ceil((this.gameRule.clubGold || 0) / payPlayer.length)
-      if (goldPay === 0) {
-        goldPay = 1;
-      }
-      for (let i = 0; i < payPlayer.length; i ++) {
-        payResult = await service.club.calculateGold(club.shortId, payPlayer[i], goldPay);
-        if (payResult.inviterGold > 0) {
-          // 需要给邀请人分成
-          await this.adjustPlayerClubGold(club, -goldPay, payPlayer[i],
-            "游戏消耗，房间号：" + this._id)
-          await this.adjustPlayerClubGold(club, payResult.inviterGold, payResult.inviterPlayerId,
-          "游戏金币分成，房间号：" + this._id)
-        } else {
-          await this.adjustPlayerClubGold(club, -goldPay, payPlayer[i], "游戏消耗，房间号：" + this._id)
-        }
-      }
-      return;
-    }
-    // aa支付, 每个人都扣相同金币
-    goldPay = this.gameRule.clubGold || 0;
-    for (let i = 0; i < this.snapshot.length; i ++) {
-      const p = this.snapshot[i]
-      if (p) {
-        payResult = await service.club.calculateGold(club.shortId, p.model._id, goldPay);
-        if (payResult.inviterGold > 0) {
-          // 需要给邀请人分成
-          await this.adjustPlayerClubGold(club, -goldPay, p.model._id, "游戏消耗，房间号：" + this._id)
-          await this.adjustPlayerClubGold(club, payResult.inviterGold, payResult.inviterPlayerId,
-            "游戏金币分成，房间号：" + this._id)
-        } else {
-          await this.adjustPlayerClubGold(club, -goldPay, p.model._id, "游戏消耗，房间号：" + this._id)
-        }
-      }
-    }
-  }
-
-  async adjustPlayerClubGold(club, goldPay, playerId, info) {
-    let memberShip = await ClubMember.findOne({ club: club._id, member: playerId});
-    if (!memberShip) {
-      // 检查联盟战队
-      memberShip = await ClubMember.findOne({
-        unionClubShortId: club.shortId,
-        member: playerId,
-      })
-    }
-    if (memberShip) {
-      memberShip.clubGold += goldPay;
-      await ClubGoldRecord.create({
-        club: club._id,
-        member: playerId,
-        gameType: this.gameRule.type,
-        goldChange: goldPay,
-        allClubGold: memberShip.clubGold,
-        info,
-      })
-      await memberShip.save()
-    }
-  }
-
-  // 结算金币分
-  async updateClubGoldByScore(scores: { [playerId: string]: number }) {
-    if (!this.clubId) {
-      return;
-    }
-    const club = await Club.findOne({_id: this.clubId})
-    if (club && this.gameRule.useClubGold) {
-      for (const playerId of Object.keys(scores)) {
-        const p = this.players.find(value => {
-          return value && value._id === playerId
-        });
-        if (!p) {
-          continue;
-        }
-        p.model.clubGold += scores[playerId];
-        await this.adjustPlayerClubGold(club, scores[playerId], playerId, "游戏输赢，房间号：" + this._id)
-      }
-    }
-  }
-
-  // 是否支付战队金币
-  isPayClubGold(roomState = 'normal') {
-    return this.gameRule.useClubGold && (this.game.juIndex === this.gameRule.juShu || roomState === "dissolve")
   }
 
   // 更新房卡记录
@@ -1133,7 +1005,7 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
     const model = await service.qian.saveBlessLevel(player.model.shortId, this._id, index + 1);
     this.blessLevel[player.model.shortId] = model.blessLevel;
     this.replySuccess(player, key, { index: blessIndex, blessLevel: model.blessLevel });
-    this.updateResource2Client(player);
+    await this.updateResource2Client(player);
     // 通知祈福等级更新
     this.broadcast('game/updateBlessLevel', {index: this.indexOf(player), blessLevel: model.blessLevel })
   }
@@ -1147,8 +1019,12 @@ export abstract class RoomBase extends EventEmitter implements IRoom, Serializab
   }
 
   // 转发，通知客户端
-  updateResource2Client(player) {
-    player.sendMessage('resource/update', {ok: true, data: {gold: player.model.gold, diamond: player.model.diamond, tlGold: player.model.tlGold}})
+  async updateResource2Client(player) {
+    const model = await service.playerService.getPlayerModel(player._id);
+    player.sendMessage('resource/update', {
+      ok: true,
+      data: {gold: model.gold, diamond: model.diamond, tlGold: model.tlGold, redPocket: model.redPocket}
+    })
   }
 
   async payRubyForStart() {

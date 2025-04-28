@@ -24,6 +24,8 @@ import PlayerHeadBorder from "../../database/models/PlayerHeadBorder";
 import PlayerCardTable from "../../database/models/PlayerCardTable";
 import PlayerCardTypeRecord from "../../database/models/playerCardTypeRecord";
 import RoomGangRecord from "../../database/models/roomGangRecord";
+import * as config from "../../config"
+import RoomTimeRecord from "../../database/models/roomTimeRecord";
 
 const stateWaitDa = 1
 const stateWaitAction = 2
@@ -335,6 +337,12 @@ class TableState implements Serializable {
     type: number;
     index: number;
   }
+
+  // 等待复活人数
+  waitRechargeCount: number = 0;
+
+  // 已经复活人数
+  alreadyRechargeCount: number = 0;
 
   constructor(room: Room, rule: Rule, restJushu: number) {
     this.restJushu = restJushu
@@ -672,14 +680,14 @@ class TableState implements Serializable {
       // 根(胡牌时，手中含有某特定牌张的全部4张(未杠出，不计红中))
       if (cardTypes[i].cardId === 91 && isGame) {
         const status = await this.checkGen(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
 
       if (cardTypes[i].cardId === 90 && isGame) {
         const status = await this.checkQiangGangHu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -687,7 +695,7 @@ class TableState implements Serializable {
       // 绝张(牌河中已出现过多枚，胡牌时仅剩当前胡牌张的和牌)
       if (cardTypes[i].cardId === 89 && isGame) {
         const status = await this.checkJueZhang(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -695,7 +703,7 @@ class TableState implements Serializable {
       // 杠上炮(胡其他家杠牌后打出的牌)
       if (cardTypes[i].cardId === 88 && type === 2) {
         const status = await this.checkGangShangPao(player, dianPaoPlayer);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           // console.warn("index-%s, from-%s", this.atIndex(player), this.atIndex(dianPaoPlayer));
           cardType = cardTypes[i];
         }
@@ -704,7 +712,7 @@ class TableState implements Serializable {
       // 海底捞月(剩余牌张数位0的胡其他家点炮的牌)
       if (cardTypes[i].cardId === 87 && type === 2 && isGame) {
         const status = await this.checkHaiDiLaoYue(player);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -712,7 +720,7 @@ class TableState implements Serializable {
       // 妙手回春(剩余牌张数位0的自摸)
       if (cardTypes[i].cardId === 86 && type === 1 && isGame) {
         const status = await this.checkMiaoShouHuiChun(player);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -720,7 +728,7 @@ class TableState implements Serializable {
       // 边张(胡牌时，仅能以12胡3或89胡7的特定单面听胡)
       if (cardTypes[i].cardId === 85 && isGame) {
         const status = await this.checkBianZhang(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -728,7 +736,7 @@ class TableState implements Serializable {
       // 坎张(胡牌时，仅能胡一组顺子中间的一张牌)
       if (cardTypes[i].cardId === 84 && isGame) {
         const status = await this.checkKanZhang(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -736,7 +744,7 @@ class TableState implements Serializable {
       // 双同刻(含有两种花色的同一序数牌刻(杠)的和牌)
       if (cardTypes[i].cardId === 83) {
         const status = await this.checkShuangTongKe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -744,7 +752,7 @@ class TableState implements Serializable {
       // 双暗刻(含有2组暗刻(暗杠)的和牌)
       if (cardTypes[i].cardId === 82) {
         const status = await this.checkShuangAnKe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -752,7 +760,7 @@ class TableState implements Serializable {
       // 断么九(仅由序数牌2到8组成的和牌)
       if (cardTypes[i].cardId === 81) {
         const status = await this.checkDuanYaoJiu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -760,7 +768,7 @@ class TableState implements Serializable {
       // 门清(没有碰和明杠的情况下，胡其他家点炮的牌)
       if (cardTypes[i].cardId === 80 && type === 2) {
         const status = await this.checkMenQing(player);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -768,7 +776,7 @@ class TableState implements Serializable {
       // 老少副(同一花色的两组顺子123和789)
       if (cardTypes[i].cardId === 79) {
         const status = await this.checkLaoShaoFu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -776,7 +784,7 @@ class TableState implements Serializable {
       // 对对胡(由4组刻(杠)加一对将组成的和牌)
       if (cardTypes[i].cardId === 78) {
         const status = await this.checkDuiDuiHu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -784,7 +792,7 @@ class TableState implements Serializable {
       // 不求人(没有碰和明杠的自摸胡)
       if (cardTypes[i].cardId === 77 && type === 1) {
         const status = await this.checkBuQiuRen(player);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -792,7 +800,7 @@ class TableState implements Serializable {
       // 推不倒(仅由1234589筒和245689条组成的和牌)
       if (cardTypes[i].cardId === 76) {
         const status = await this.checkTuiBuDao(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -800,7 +808,7 @@ class TableState implements Serializable {
       // 杠上开花(用开杠后的补牌胡牌)
       if (cardTypes[i].cardId === 75 && type === 1 && isGame) {
         const status = await this.checkGangShangHua(player);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -808,7 +816,7 @@ class TableState implements Serializable {
       // 清龙(含有同一花色123、456、789三组顺子的和牌)
       if (cardTypes[i].cardId === 74) {
         const status = await this.checkQingLong(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -816,7 +824,7 @@ class TableState implements Serializable {
       // 清一色(仅由同一种花色序数牌组成的和牌)
       if (cardTypes[i].cardId === 73) {
         const status = await this.checkQingYiSe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -824,7 +832,7 @@ class TableState implements Serializable {
       // 七对(由7个对子组成的特殊和牌型)
       if (cardTypes[i].cardId === 72) {
         const status = await this.checkQiDui(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -832,7 +840,7 @@ class TableState implements Serializable {
       // 三暗刻(含有3组暗刻(暗杠)的和牌)
       if (cardTypes[i].cardId === 71) {
         const status = await this.checkSanAnKe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -840,7 +848,7 @@ class TableState implements Serializable {
       // 小于五(仅由序数牌12345组成的和牌)
       if (cardTypes[i].cardId === 70) {
         const status = await this.checkXiaoYuWu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -848,7 +856,7 @@ class TableState implements Serializable {
       // 大于五(仅由序数牌6789组成的和牌)
       if (cardTypes[i].cardId === 69) {
         const status = await this.checkDaYuWu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -856,7 +864,7 @@ class TableState implements Serializable {
       // 百万石(胡牌时，手中的万字牌序数相加大于等于100)
       if (cardTypes[i].cardId === 68) {
         const status = await this.checkBaiWanShi(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -864,7 +872,7 @@ class TableState implements Serializable {
       // 金钩钩(胡牌时，手上只有1张牌，其余牌均被碰·杠出。不计对对胡)
       if (cardTypes[i].cardId === 67) {
         const status = await this.checkJinGouGou(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -872,7 +880,7 @@ class TableState implements Serializable {
       // 三节高(含有同一花色中3组序数相连刻(杠)的和牌)
       if (cardTypes[i].cardId === 66) {
         const status = await this.checkSanJieGao(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -880,7 +888,7 @@ class TableState implements Serializable {
       // 全双刻(仅由序数牌2468组成的对对胡)
       if (cardTypes[i].cardId === 65) {
         const status = await this.checkQuanShuangKe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -888,7 +896,7 @@ class TableState implements Serializable {
       // 十二金钗(含有3组杠的和牌)
       if (cardTypes[i].cardId === 64) {
         const status = await this.checkShiErJinChai(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -896,7 +904,7 @@ class TableState implements Serializable {
       // 四暗刻(含有4组暗刻(暗杠)的和牌，不计对对胡)
       if (cardTypes[i].cardId === 63) {
         const status = await this.checkSiAnKe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -904,7 +912,7 @@ class TableState implements Serializable {
       // 四节高(含有同一花色中4组序数相连刻(杠)的和牌)
       if (cardTypes[i].cardId === 62) {
         const status = await this.checkSiJieGao(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -912,7 +920,7 @@ class TableState implements Serializable {
       // 全小(仅由序数牌123组成的和牌)
       if (cardTypes[i].cardId === 61) {
         const status = await this.checkHunXiao(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -920,7 +928,7 @@ class TableState implements Serializable {
       // 全中(仅由序数牌456组成的和牌)
       if (cardTypes[i].cardId === 60) {
         const status = await this.checkHunZhong(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -928,7 +936,7 @@ class TableState implements Serializable {
       // 全大(仅由序数牌789组成的和牌)
       if (cardTypes[i].cardId === 59) {
         const status = await this.checkHunDa(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -936,7 +944,7 @@ class TableState implements Serializable {
       // 十八罗汉(含有4组杠的和牌)
       if (cardTypes[i].cardId === 58) {
         const status = await this.checkShiBaLuoHan(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -944,7 +952,7 @@ class TableState implements Serializable {
       // 地胡(非庄家摸到的第一张牌胡牌(每一家的碰·杠·胡等操作均会使地胡不成立))
       if (cardTypes[i].cardId === 57 && !player.zhuang && type === 1) {
         const status = await this.checkDiHu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -952,7 +960,7 @@ class TableState implements Serializable {
       // 绿一色(仅由23468条组成的和牌，不计清一色)
       if (cardTypes[i].cardId === 56) {
         const status = await this.checkLvYiSe(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -960,7 +968,7 @@ class TableState implements Serializable {
       // 天胡(庄家起手时直接胡牌)
       if (cardTypes[i].cardId === 55 && isGame) {
         const status = await this.checkTianHu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -968,7 +976,7 @@ class TableState implements Serializable {
       // 九莲宝灯(由同一花色的序数牌1112345678999组成特定听牌型后的和牌)
       if (cardTypes[i].cardId === 54) {
         const status = await this.checkJiuLianBaoDeng(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -976,7 +984,7 @@ class TableState implements Serializable {
       // 一色双龙会(含同一花色的两组老少副(123+789),且由该花色的序数牌5做将的特定和牌型，不计7对)
       if (cardTypes[i].cardId === 61) {
         const status = await this.checkYiSeShuangLongHui(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -984,7 +992,7 @@ class TableState implements Serializable {
       // 连七对(由同一花色的序数牌组成序数相连的7个对子的和牌)
       if (cardTypes[i].cardId === 52) {
         const status = await this.checkLianQiDui(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -992,7 +1000,7 @@ class TableState implements Serializable {
       // 清幺九(仅由序数牌1和9组成的和牌)
       if (cardTypes[i].cardId === 51) {
         const status = await this.checkQingYaoJiu(player, type);
-        if (status && cardTypes[i].multiple > cardType.multiple) {
+        if (status && cardTypes[i].multiple >= cardType.multiple) {
           cardType = cardTypes[i];
         }
       }
@@ -2391,6 +2399,9 @@ class TableState implements Serializable {
               const card = this.promptWithPattern(player, this.lastTakeCard);
               player.emitter.emit(Enums.da, this.turn, card);
             }
+          } else {
+            const card = this.promptWithPattern(player, null);
+            player.emitter.emit(Enums.da, this.turn, card);
           }
         }
 
@@ -2399,7 +2410,7 @@ class TableState implements Serializable {
     })
     player.on('waitForDoSomeThing', msg => {
       player.deposit(async () => {
-        if (!player.zhuang) {
+        if (player.isRobot) {
           return ;
         }
 
@@ -2413,12 +2424,18 @@ class TableState implements Serializable {
           // console.warn("player index-%s deposit choice card-%s", this.atIndex(player), card);
 
           player.sendMessage("game/chooseMultiple", {ok: true, data: {action: todo, card, index: this.atIndex(player)}});
+
+          if (this.manyHuPlayers.length >= this.manyHuArray.length && !this.isRunMultiple) {
+            this.isRunMultiple = true;
+            player.emitter.emit(Enums.multipleHu, this.turn, this.stateData.card);
+          }
+
           return ;
         }
 
         const nextDo = async () => {
-          if (todo === Enums.peng) {
-            player.emitter.emit(Enums.guo, this.turn, card)
+          if (todo === Enums.peng && !player.isGameHu) {
+            player.emitter.emit(Enums.peng, this.turn, card)
           } else if (todo === Enums.gang && !player.isGameHu) {
             // console.warn("gang index-%s card-%s todo-%s", this.atIndex(player), msg.data.card, todo);
             player.emitter.emit(Enums.gangByOtherDa, this.turn, card);
@@ -2477,10 +2494,11 @@ class TableState implements Serializable {
       if (!player.onDeposit) {
         player.isMingCard = true;
         player.mingMultiple = 6;
-        await player.sendMessage('game/openCardReply', {
+        this.room.broadcast('game/openCardReply', {
           ok: true,
-          data: {roomId: this.room._id, index: this.atIndex(player)}
+          data: {roomId: this.room._id, index: this.atIndex(player), cards: player.getCardsArray()}
         });
+        player.emitter.emit('waitForDa')
       } else {
         await player.sendMessage('game/openCardReply', {ok: false, data: {}});
       }
@@ -2498,37 +2516,36 @@ class TableState implements Serializable {
           id: this.cardTypes.cardId,
           multiple: this.cardTypes.multiple * conf.base * conf.Ante * player.mingMultiple > conf.maxMultiple ? conf.maxMultiple : this.cardTypes.multiple * conf.base * conf.Ante * player.mingMultiple
         }, false);
+      msg["seatIndex"] = this.zhuang.seatIndex;
 
       // player.emitter.emit('waitForDa', msg)
 
-      await player.sendMessage('game/getActionsReply', {ok: true, data: msg});
+      this.room.broadcast('game/getActionsReply', {ok: true, data: msg});
     })
 
     player.on(Enums.restoreGame, async () => {
-      if (this.room.robotManager.model.step === RobotStep.waitRuby) {
+      this.alreadyRechargeCount++;
+      if (this.alreadyRechargeCount >= this.waitRechargeCount) {
         this.room.robotManager.model.step = RobotStep.running;
+      }
 
-        // 如果当前是复活用户打牌，则重新设置stateData,以激活托管机器人
-        if (this.stateData[Enums.da] && this.stateData[Enums.da]._id === player._id) {
-          this.state = stateWaitDa;
-          this.stateData = {da: player, card: this.lastTakeCard};
+      if (this.stateData[Enums.da] && this.stateData[Enums.da]._id === player._id) {
+        this.state = stateWaitDa;
+        this.stateData = {da: player, card: this.lastTakeCard};
+      }
+
+      this.room.broadcast('game/restoreGameReply', {
+        ok: true,
+        data: {roomId: this.room._id, index: this.atIndex(player), step: this.room.robotManager.model.step}
+      });
+
+      // 如果当前是摸牌状态，则给下家摸牌
+      if (this.gameMoStatus.state) {
+        const huTakeCard = async () => {
+          this.players[this.gameMoStatus.index].emitter.emit(Enums.huTakeCard, {from: this.gameMoStatus.from, type: this.gameMoStatus.type});
         }
 
-        await player.sendMessage('game/restoreGameReply', {
-          ok: true,
-          data: {roomId: this.room._id, index: this.atIndex(player), step: this.room.robotManager.model.step}
-        });
-
-        // 如果当前是摸牌状态，则给下家摸牌
-        if (this.gameMoStatus.state) {
-          const huTakeCard = async () => {
-            this.players[this.gameMoStatus.index].emitter.emit(Enums.huTakeCard, {from: this.gameMoStatus.from, type: this.gameMoStatus.type});
-          }
-
-          setTimeout(huTakeCard, 1000);
-        }
-      } else {
-        await player.sendMessage('game/restoreGameReply', {ok: false, data: {}});
+        setTimeout(huTakeCard, 1000);
       }
     })
 
@@ -2559,11 +2576,16 @@ class TableState implements Serializable {
       }
 
       // 一炮多响（金豆房）
-      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
         this.manyHuPlayers.push(player._id.toString());
         this.setManyAction(player, Enums.peng);
-
         player.sendMessage("game/chooseMultiple", {ok: true, data: {action: Enums.peng, card, index: this.atIndex(player)}})
+
+        if (this.manyHuPlayers.length >= this.manyHuArray.length && !this.isRunMultiple) {
+          this.isRunMultiple = true;
+          player.emitter.emit(Enums.multipleHu, this.turn, this.stateData.card);
+        }
+
         return ;
       }
 
@@ -2585,11 +2607,12 @@ class TableState implements Serializable {
         const ok = player.pengPai(card, this.lastDa);
         if (ok) {
           player.lastOperateType = 2;
+
           const hangUpList = this.stateData.hangUp;
-          // 设置所有用户地胡状态为false
-          this.players.map((p) => p.isDiHu = false)
           this.turn++;
           this.state = stateWaitDa;
+          // 设置所有用户地胡状态为false
+          this.players.map((p) => p.isDiHu = false);
           const nextStateData = {da: player};
           const gangSelection = player.getAvailableGangs();
           this.stateData = nextStateData;
@@ -2655,12 +2678,17 @@ class TableState implements Serializable {
       }
 
       // 一炮多响(金豆房)
-      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+      if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
         this.manyHuPlayers.push(player._id.toString());
         this.setManyAction(player, Enums.gang);
-        // console.warn("player index-%s choice gang card-%s manyHuArray-%s action-%s", this.atIndex(player), card, JSON.stringify(this.manyHuArray), Enums.gang);
-
         player.sendMessage("game/chooseMultiple", {ok: true, data: {action: Enums.gang, card, index: this.atIndex(player)}})
+
+        if (this.manyHuPlayers.length >= this.manyHuArray.length && !this.isRunMultiple) {
+          this.isRunMultiple = true;
+          player.emitter.emit(Enums.multipleHu, this.turn, this.stateData.card);
+          // console.warn("manyHuArray-%s manyHuPlayers-%s canManyHuPlayers-%s card-%s can many hu", JSON.stringify(this.manyHuArray), JSON.stringify(this.manyHuPlayers), JSON.stringify(this.canManyHuPlayers), this.stateData.card);
+        }
+
         return ;
       }
 
@@ -2870,10 +2898,15 @@ class TableState implements Serializable {
 
         if (isJiePao) {
           // 一炮多响(金豆房)
-          if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+          if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
             this.manyHuPlayers.push(player._id.toString());
             this.setManyAction(player, Enums.hu);
             player.sendMessage("game/chooseMultiple", {ok: true, data: {action: Enums.hu, card, index: this.atIndex(player)}})
+
+            if (this.manyHuPlayers.length >= this.manyHuArray.length && !this.isRunMultiple) {
+              this.isRunMultiple = true;
+              player.emitter.emit(Enums.multipleHu, this.turn, this.stateData.card);
+            }
 
             return ;
           }
@@ -2934,13 +2967,13 @@ class TableState implements Serializable {
 
                 const huTakeCard = async () => {
                   if (player.waitMo && this.room.robotManager.model.step === RobotStep.running) {
-                    return player.emitter.emit(Enums.huTakeCard, {from, type: 1});
+                    return player.emitter.emit(Enums.huTakeCard, {from: player.seatIndex, type: 1});
                   }
 
                   // 如果牌局暂停，则记录当前牌局状态为摸牌，并记录from和type
                   this.gameMoStatus = {
                     state: true,
-                    from,
+                    from: player.seatIndex,
                     type: 1,
                     index: this.atIndex(player)
                   }
@@ -2994,7 +3027,7 @@ class TableState implements Serializable {
                   }, player.msgDispatcher);
 
                   //第一次胡牌自动托管
-                  if (!player.onDeposit && player.zhuang && this.room.isPublic) {
+                  if (!player.onDeposit && !player.isRobot && this.room.isPublic) {
                     player.onDeposit = true
                     await player.sendMessage('game/startDepositReply', {ok: true, data: {}})
                   }
@@ -3103,7 +3136,7 @@ class TableState implements Serializable {
               }, player.msgDispatcher);
 
               // 第一次胡牌自动托管
-              if (!player.onDeposit && player.zhuang && this.room.isPublic) {
+              if (!player.onDeposit && !player.isRobot && this.room.isPublic) {
                 player.onDeposit = true
                 await player.sendMessage('game/startDepositReply', {ok: true, data: {}})
               }
@@ -3230,18 +3263,16 @@ class TableState implements Serializable {
 
   async onPlayerCommonTakeCard(message, huType) {
     let xiajia = null;
-    if (!this.players[message.from].isBroke && huType === "jiepao") {
-      xiajia = this.players[message.from];
-    } else {
-      let startIndex = (message.from + 1) % this.players.length;
 
-      // 从 startIndex 开始查找未破产的玩家
-      for (let i = startIndex; i < startIndex + this.players.length; i++) {
-        let index = i % this.players.length; // 处理边界情况，确保索引在数组范围内
-        if (!this.players[index].isBroke) {
-          xiajia = this.players[index];
-          break;
-        }
+    // 接炮的情况胡牌的下家摸牌
+    let startIndex = (message.from + 1) % this.players.length;
+
+    // 从 startIndex 开始查找未破产的玩家
+    for (let i = startIndex; i < startIndex + this.players.length; i++) {
+      let index = i % this.players.length; // 处理边界情况，确保索引在数组范围内
+      if (!this.players[index].isBroke) {
+        xiajia = this.players[index];
+        break;
       }
     }
 
@@ -3381,7 +3412,7 @@ class TableState implements Serializable {
           }
 
           //第一次胡牌自动托管
-          if (!huPlayer.onDeposit && huPlayer.zhuang && this.room.isPublic) {
+          if (!huPlayer.onDeposit && !huPlayer.isRobot && this.room.isPublic) {
             huPlayer.onDeposit = true;
             await huPlayer.sendMessage('game/startDepositReply', {ok: true, data: {}})
           }
@@ -3583,6 +3614,7 @@ class TableState implements Serializable {
       let params = {
         index: this.atIndex(p),
         _id: p.model._id.toString(),
+        isRobot: p.isRobot,
         shortId: p.model.shortId,
         gold: p.balance,
         currentGold: model.gold,
@@ -3590,7 +3622,7 @@ class TableState implements Serializable {
         huType: this.cardTypes
       };
       if (model.gold <= 0) {
-        if (params.index === 0) {
+        if (!params.isRobot) {
           if (!p.isBroke) {
             waits.push(params);
           } else {
@@ -3961,13 +3993,14 @@ class TableState implements Serializable {
       const model = await service.playerService.getPlayerModel(p.model._id.toString());
       let params = {
         index: this.atIndex(p),
+        isRobot: p.isRobot,
         _id: p.model._id.toString(),
         gold: p.balance,
         currentGold: model.gold,
         isBroke: p.isBroke
       };
       if (model.gold <= 0) {
-        if (params.index === 0) {
+        if (!params.isRobot) {
           if (!p.isBroke) {
             if (isWait) {
               waits.push(params);
@@ -4004,19 +4037,19 @@ class TableState implements Serializable {
     const states = this.players.map((player, idx) => player.genGameStatus(idx, 1))
     const nextZhuang = this.nextZhuang()
 
+    const waitRecharge = async () => {
+      if (waits.length > 0 && !this.isGameOver && this.room.robotManager.model.step === RobotStep.running) {
+        this.room.robotManager.model.step = RobotStep.waitRuby;
+        this.room.broadcast("game/waitRechargeReply", {ok: true, data: waits});
+      }
+    }
+
     if (this.remainCards <= 0 && isWait) {
       return await this.gameAllOver(states, [], nextZhuang);
     }
 
     if ((this.isGameOver || brokePlayers.length >= 3) && isWait) {
       await this.gameAllOver(states, [], nextZhuang);
-    }
-
-    const waitRecharge = async () => {
-      if (waits.length > 0 && !this.isGameOver && this.room.robotManager.model.step === RobotStep.running) {
-        this.room.robotManager.model.step = RobotStep.waitRuby;
-        this.room.broadcast("game/waitRechargeReply", {ok: true, data: waits});
-      }
     }
 
     return true;
@@ -4566,6 +4599,13 @@ class TableState implements Serializable {
     p.gameOver();
     this.room.removeReadyPlayer(p._id.toString());
 
+    if (!p.isRobot) {
+      this.alreadyRechargeCount++;
+      if (this.alreadyRechargeCount >= this.waitRechargeCount) {
+        this.room.robotManager.model.step = RobotStep.running;
+      }
+    }
+
     // 记录破产人数
     if (!this.brokeList.includes(p._id.toString())) {
       p.isBroke = true;
@@ -4642,6 +4682,7 @@ class TableState implements Serializable {
     });
 
     p.sendMessage('game/player-over', {ok: true, data: gameOverMsg})
+    this.room.broadcast("game/playerBankruptcy", {ok: true, data: {index: p.seatIndex}});
 
     // 如果目前打牌的是破产用户，找到下一个正常用户
     if (this.stateData[Enums.da] && this.stateData[Enums.da]._id.toString() === p.model._id.toString()) {
@@ -4701,10 +4742,6 @@ class TableState implements Serializable {
               data: sendMsg
             }, xiajia.msgDispatcher)
           }
-
-          if (p.zhuang) {
-            this.room.robotManager.model.step = RobotStep.running;
-          }
         }
 
         setTimeout(nextDo, 200);
@@ -4713,16 +4750,15 @@ class TableState implements Serializable {
         const nextZhuang = this.nextZhuang()
         await this.gameAllOver(states, [], nextZhuang);
       }
-    } else {
-      if (p.zhuang) {
-        this.room.robotManager.model.step = RobotStep.running;
-      }
     }
   }
 
   async gameAllOver(states, niaos, nextZhuang) {
-    this.state = stateGameOver;
+    if (this.state === stateGameOver) {
+      return ;
+    }
 
+    this.state = stateGameOver;
     this.players.forEach(x => x.gameOver())
     this.room.removeListener('reconnect', this.onReconnect)
     this.room.removeListener('empty', this.onRoomEmpty)
@@ -4772,11 +4808,11 @@ class TableState implements Serializable {
     const scoreRecords = [];
 
     for (let i = 0; i < records.length; i++) {
-      if (states.length > 0 && states[0].score >= 0 && states[0].model._id === records[i].winnerId) {
+      if (states.length > 0 && states[0].score >= 0 && states[0].model._id.toString() === records[i].winnerId.toString()) {
         scoreRecords.push(records[i]);
       }
 
-      if (states.length > 0 && states[0].score < 0 && records[i].failList.includes(states[0].model._id)) {
+      if (states.length > 0 && states[0].score < 0 && records[i].failList.includes(states[0].model._id.toString())) {
         scoreRecords.push(records[i]);
       }
     }
@@ -4796,40 +4832,7 @@ class TableState implements Serializable {
     }
 
     // 计算胜率
-    for (let i = 0; i < this.players.length; i++) {
-      const model = await Player.findOne({_id: this.players[i]._id});
-      model.isGame = false;
-
-      if (!this.players[i].isCalcJu) {
-        model.juCount++;
-        if (this.players[i].juScore > 0) {
-          model.juWinCount++;
-        }
-        model.juRank = (model.juWinCount / model.juCount).toFixed(2);
-
-        if (this.players[i].juScore > 0) {
-          model.juContinueWinCount++;
-
-          if (this.players[i].juScore > model.reapingMachineAmount) {
-            model.reapingMachineAmount = this.players[i].juScore;
-          }
-        }
-
-        if (this.players[i].juScore === 0) {
-          model.noStrokeCount++;
-        }
-
-        if (this.players[i].juScore < 0) {
-          model.juContinueWinCount = 0;
-
-          if (Math.abs(this.players[i].juScore) > model.looseMoneyBoyAmount) {
-            model.looseMoneyBoyAmount = Math.abs(this.players[i].juScore);
-          }
-        }
-      }
-
-      await model.save();
-    }
+    await this.calcJuRank();
 
     if (states.length > 0) {
       await this.room.recordGameRecord(this, states);
@@ -4864,6 +4867,43 @@ class TableState implements Serializable {
     }
   }
 
+  async calcJuRank() {
+    for (let i = 0; i < this.players.length; i++) {
+      const model = await Player.findOne({_id: this.players[i]._id});
+      model.isGame = false;
+
+      if (!this.players[i].isCalcJu) {
+        model.juCount++;
+        if (this.players[i].juScore > 0) {
+          model.juWinCount++;
+        }
+        model.juRank = (model.juWinCount / model.juCount).toFixed(2);
+
+        if (this.players[i].juScore > 0) {
+          model.juContinueWinCount++;
+
+          if (this.players[i].juScore > model.reapingMachineAmount) {
+            model.reapingMachineAmount = this.players[i].juScore;
+          }
+        }
+
+        if (this.players[i].juScore === 0) {
+          model.noStrokeCount++;
+        }
+
+        if (this.players[i].juScore < 0) {
+          model.juContinueWinCount = 0;
+
+          if (Math.abs(this.players[i].juScore) > model.looseMoneyBoyAmount) {
+            model.looseMoneyBoyAmount = Math.abs(this.players[i].juScore);
+          }
+        }
+      }
+
+      await model.save();
+    }
+  }
+
   dissolve() {
     // TODO 停止牌局 托管停止 减少服务器计算消耗
     this.logger.close()
@@ -4872,6 +4912,18 @@ class TableState implements Serializable {
 
   listenRoom(room) {
     room.on('reconnect', this.onReconnect = async (playerMsgDispatcher, index) => {
+      let m = await RoomTimeRecord.findOne({ roomId: this.room._id });
+      if (m) {
+        const currentTime = new Date().getTime();
+        const startTime = Date.parse(m.createAt);
+
+        // console.warn("startTime %s currentTime %s", startTime, currentTime);
+
+        if (currentTime - startTime > config.game.dissolveTime) {
+          return await this.room.forceDissolve();
+        }
+      }
+
       const player = this.players[index];
       player.onDeposit = false;
       player.reconnect(playerMsgDispatcher);
@@ -4901,11 +4953,6 @@ class TableState implements Serializable {
 
   async generateReconnectMsg(index) {
     const player = this.players[index];
-    let roomRubyReward = 0;
-    const lastRecord = await service.rubyReward.getLastRubyRecord(this.room.uid);
-    if (lastRecord) {
-      roomRubyReward = lastRecord.balance;
-    }
     const category = await GameCategory.findOne({_id: this.room.gameRule.categoryId}).lean();
     const pushMsg = {
       index, status: [], _id: this.room._id, rule: this.rule,
@@ -4945,13 +4992,11 @@ class TableState implements Serializable {
 
       if (i === index) {
         msg = this.players[i].genSelfStates(i);
-        msg.roomRubyReward = roomRubyReward;
         msg.events.huCards = msg.huCards.slice();
         msg.onDeposit = this.players[i].onDeposit;
         pushMsg.status.push(msg);
       } else {
         msg = this.players[i].genOppoStates(i);
-        msg.roomRubyReward = roomRubyReward;
         msg.events.huCards = msg.huCards.slice();
         msg.onDeposit = this.players[i].onDeposit;
         pushMsg.status.push(msg);
@@ -4964,6 +5009,7 @@ class TableState implements Serializable {
     switch (this.state) {
       case stateWaitDa: {
         const daPlayer = this.stateData[Enums.da];
+        // 重连无法托管，需要设置允许托管
         if (daPlayer && daPlayer._id.toString() === player._id.toString()) {
           pushMsg.current = {
             index,
@@ -4972,17 +5018,8 @@ class TableState implements Serializable {
           }
         } else {
           pushMsg.current = {index: this.atIndex(daPlayer), state: 'waitDa'};
-          // if (!daPlayer) {
-          //   await this.room.forceDissolve();
-          // } else {
-          //   const index = this.atIndex(daPlayer);
-          //   if (index === -1) {
-          //     await this.room.forceDissolve();
-          //   } else {
-          //     pushMsg.current = {index: this.atIndex(daPlayer), state: 'waitDa'};
-          //   }
-          // }
         }
+
         break
       }
       case stateWaitAction: {
@@ -5005,62 +5042,6 @@ class TableState implements Serializable {
         }
         break
       }
-      case stateWaitGangShangHua: {
-        if (this.stateData.player === player) {
-          pushMsg.current = {
-            index,
-            state: 'waitGangShangHua',
-            msg: this.stateData.msg,
-          }
-        } else {
-          pushMsg.current = {index: this.atIndex(this.stateData.player), state: 'waitGangShangHua'}
-        }
-        break
-      }
-      case stateWaitGangShangAction: {
-        const indices = this.stateData.currentIndex
-        for (let i = 0; i < indices.length; i++) {
-          if (indices[i] === index) {
-            pushMsg.current = {index, state: 'waitGangShangAction', msg: this.stateData.lastMsg[i]}
-            break
-          }
-        }
-        break
-      }
-      case stateQiangHaiDi: {
-        if (this.stateData.player === player) {
-          pushMsg.current = {
-            index,
-            state: 'qiangHaiDi',
-            msg: this.stateData.msg,
-          }
-        } else {
-          pushMsg.current = {index: this.atIndex(this.stateData.player), state: 'qiangHaiDi'}
-        }
-        break
-      }
-      case stateWaitDaHaiDi: {
-        if (this.stateData.player === player) {
-          pushMsg.current = {
-            index,
-            state: 'waitDaHaiDi',
-            msg: this.stateData.msg,
-          }
-        } else {
-          pushMsg.current = {index: this.atIndex(this.stateData.player), state: 'waitDaHaiDi'}
-        }
-        break;
-      }
-      case stateWaitHaiDiPao: {
-        const indices = this.stateData.currentIndex
-        for (let i = 0; i < indices.length; i++) {
-          if (indices[i] === index) {
-            pushMsg.current = {index, state: 'waitHaiDiPao', msg: this.stateData.lastMsg[i]}
-            break
-          }
-        }
-        break
-      }
       default:
         await this.room.forceDissolve();
         break
@@ -5079,9 +5060,14 @@ class TableState implements Serializable {
 
   async onPlayerGuo(player, playTurn, playCard) {
     // 一炮多响(金豆房)
-    if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && player.zhuang && this.room.isPublic) {
+    if (this.room.gameState.isManyHu && !this.manyHuPlayers.includes(player._id) && this.room.isPublic) {
       this.manyHuPlayers.push(player._id.toString());
       this.setManyAction(player, Enums.guo);
+
+      if (this.manyHuPlayers.length >= this.manyHuArray.length && !this.isRunMultiple) {
+        this.isRunMultiple = true;
+        player.emitter.emit(Enums.multipleHu, this.turn, this.stateData.card);
+      }
 
       player.sendMessage("game/chooseMultiple", {ok: true, data: {action: Enums.guo, card: playCard, index: this.atIndex(player)}})
       return ;
@@ -5118,13 +5104,13 @@ class TableState implements Serializable {
     // 一炮多响
     if (this.isManyHu) {
       // 一炮多响
-      if (!this.manyHuPlayers.includes(this.zhuang._id.toString()) && this.canManyHuPlayers.includes(this.zhuang._id.toString())) {
-        // console.warn("player index-%s not choice card-%s", this.atIndex(this.zhuang), this.stateData.card);
-        return ;
+      for (let i = 0; i < this.canManyHuPlayers.length; i++) {
+        const pp = this.players.find(p => p._id.toString() === this.canManyHuPlayers[i]);
+        if (pp && !pp.isRobot && !this.manyHuPlayers.includes(pp._id.toString())) {
+          // console.warn("player index-%s not choice card-%s", this.atIndex(pp), this.stateData.card);
+          return ;
+        }
       }
-
-      // console.warn("manyHuPlayers-%s canManyHuPlayers-%s manyHuArray-%s playerId-%s flag-%s todo-%s isRunMultiple-%s", JSON.stringify(this.manyHuPlayers), JSON.stringify(this.canManyHuPlayers),
-      //   JSON.stringify(this.manyHuArray), player._id, this.manyHuPlayers.includes(player._id.toString()), todo, this.isRunMultiple);
 
       // 如果机器人没有操作，则push到数组
       if (!this.manyHuPlayers.includes(player._id.toString())) {
@@ -5171,16 +5157,16 @@ class TableState implements Serializable {
   promptWithPattern(player: PlayerState, lastTakeCard) {
     // 获取摸牌前的卡牌
     const cards = player.cards.slice();
-    if (cards[lastTakeCard] > 0) cards[lastTakeCard]--;
+    if (lastTakeCard && cards[lastTakeCard] > 0) cards[lastTakeCard]--;
     // 如果用户听牌，则直接打摸牌
     const ting = player.isRobotTing(cards);
     const isDingQue = this.checkDingQueCard(player);
     if (ting.hu && isDingQue) {
-      if (player.cards[lastTakeCard] > 0 && lastTakeCard !== Enums.zhong) return lastTakeCard;
+      if (lastTakeCard && player.cards[lastTakeCard] > 0 && lastTakeCard !== Enums.zhong) return lastTakeCard;
     }
 
     // 如果用户已经胡牌，则直接打摸牌
-    if (player.isGameHu && player.cards[lastTakeCard] > 0) {
+    if (lastTakeCard && player.isGameHu && player.cards[lastTakeCard] > 0) {
       return lastTakeCard;
     }
 

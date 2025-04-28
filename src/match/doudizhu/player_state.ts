@@ -11,8 +11,6 @@ import Room from './room'
 import Rule from './Rule'
 import {default as Table} from "./table";
 import enums from "./enums";
-import Enums from "../xmmajiang/enums";
-import {genCardArray} from "../xmmajiang/player_state";
 
 const removeCard = (src, odst) => {
   const dst = odst.slice()
@@ -62,7 +60,7 @@ class PlayerState implements Serializable {
   events: any
 
   recorder: IGameRecorder
-  record: (event: string, cards?: Card[]) => void
+  record: (event: string, cards?: Card[], pattern?: IPattern) => void
   rule: Rule
   model: any
   disconnectCallBack: (anyData: any) => void
@@ -100,6 +98,15 @@ class PlayerState implements Serializable {
   openMultiple: number = 1;
   // 小局倍数
   multiple: number = 1;
+  // 是否机器人
+  isRobot: boolean = false;
+
+  // 已经出掉的牌
+  @autoSerialize
+  dropped: any[]
+
+  // 地主次数
+  landloadCount: number = 0;
 
   constructor(userSocket, room, rule) {
     this.room = room
@@ -109,6 +116,7 @@ class PlayerState implements Serializable {
     this.model = userSocket.model
     this.emitter = new EventEmitter()
     this.cards = []
+    this.dropped = [];
     this.score = room.getScoreBy(userSocket)
     this.disconnectCallBack = player => {
       if (player._id.toString() === this.msgDispatcher._id.toString()) {
@@ -116,12 +124,15 @@ class PlayerState implements Serializable {
       }
     }
     this.listenDispatcher(userSocket)
+    this.isRobot = !!userSocket.isRobot();
     this.msgDispatcher = userSocket
     this.events = {}
 
     this.isOperated = false
     this.recorder = new DummyRecorder()
     this.onDeposit = false;
+    this.isMultiple = false;
+    this.isOpenCard = false;
   }
 
   getCardsArray(): Card[] {
@@ -154,17 +165,17 @@ class PlayerState implements Serializable {
 
   setGameRecorder(r) {
     this.recorder = r
-    this.record = (event, cards?) => this.recorder.recordUserEvent(this, event, cards)
+    this.record = (event, cards?, pattern?) => this.recorder.recordUserEvent(this, event, cards, pattern)
     return this
   }
 
-  onShuffle(juShu, cards: Card[], seatIndex, juIndex, needShuffle: boolean, allPlayerCards) {
+  onShuffle(juShu, cards: Card[], seatIndex, juIndex, needShuffle: boolean, allPlayerCards, cardRecorderStatus) {
     this.cards = cards
     this.index = seatIndex
 
     this.recorder.recordUserEvent(this, 'shuffle')
     this.unusedJokers = this.cards.filter(c => c.type === CardType.Joker).length
-    this.sendMessage('game/ShuffleCards', {ok: true, data: {juShu, cards, juIndex, needShuffle: !!needShuffle, allPlayerCards }})
+    this.sendMessage('game/ShuffleCards', {ok: true, data: {juShu, cards, juIndex, needShuffle: !!needShuffle, allPlayerCards, cardRecorderStatus }})
   }
 
   toJSON() {
@@ -198,8 +209,9 @@ class PlayerState implements Serializable {
     this.cards = removeCard(this.cards, daCards)
     this.lastPattern = pattern
     this.lastAction = 'da'
+    this.dropped.push(daCards)
     this.clearDepositTask()
-    this.record('da', daCards)
+    this.record('da', daCards, pattern)
   }
 
   get remains() {
@@ -266,10 +278,16 @@ class PlayerState implements Serializable {
     }, 0)
   }
 
-  private baseStatus(table: Table) {
+  private async baseStatus(table: Table) {
+    // 判断是否使用记牌器
+    const cardRecorderStatus = await this.room.gameState.getCardRecorder(this);
     return {
       model: this.model,
       mode: this.mode,
+      multiple: this.multiple,
+      cardRecorderStatus,
+      droppedCards: this.dropped,
+      isOpenCard: this.isOpenCard,
       index: this.index,
       score: this.room.getScoreBy(this._id),
       remains: this.cards.length,
@@ -279,16 +297,20 @@ class PlayerState implements Serializable {
     }
   }
 
-  statusForSelf(table: Table) {
-    const base = this.baseStatus(table)
+  async statusForSelf(table: Table) {
+    const base = await this.baseStatus(table)
     return {
       ...base,
-      cards: this.cards,
+      pukerCards: this.cards,
     }
   }
 
-  statusForOther(table: Table) {
-    return this.baseStatus(table)
+  async statusForOther(table: Table) {
+    let base = await this.baseStatus(table);
+    if (this.isOpenCard) {
+      base["pukerCards"] = this.cards;
+    }
+    return base;
   }
 
   guo() {
@@ -314,24 +336,43 @@ class PlayerState implements Serializable {
 
   // 托管
   deposit(callback) {
-    const minutes = 5 * 1000;
-    if (this.index === 0) {
+    console.warn("currentPlayerStep %s", this.room.gameState.currentPlayerStep);
+    if (this.room.gameState.currentPlayerStep === -1) {
+      return;
+    }
+
+    const randomNumber = Math.floor(Math.random() * 4) + 2;
+    let minutes = this.isRobot ? randomNumber * 1000 : 5 * 1000;
+
+    // 好友房设置不托管
+    if (!this.room.isPublic && !this.rule.ro.autoCommit) {
+      console.warn("friend room is not autoCommit");
       return ;
     }
 
-    // if (!this.msgDispatcher) {
-    //   return;
-    // }
+    // 游戏结束不进入托管
+    if (this.room.gameState && this.room.gameState.state === 4) {
+      console.warn("game over id not autoCommit");
+      return;
+    }
 
-    // console.warn("canDeposit-%s, timeoutTask-%s", this.canDeposit, !!this.timeoutTask);
+    if (!this.room.isPublic && this.rule.ro.autoCommit && this.room.gameState && this.room.gameState.state === 3) {
+      minutes = (this.rule.ro.autoCommit + 1) * 1000;
+    }
+
+    if (this.room.isPublic && this.room.gameState && this.room.gameState.state === 3) {
+      minutes = 15 * 1000;
+    }
 
     this.cancelTimeout()
 
     if (!this.onDeposit) {
       this.timeoutTask = setTimeout(() => {
-        if (this.room.gameState.currentPlayerStep === this.index) {
-          this.onDeposit = true
-          this.sendMessage('game/startDepositReply', {ok: true, data: {}})
+        if (this.room.gameState && this.room.gameState.currentPlayerStep === this.index) {
+          if (this.room.gameState && this.room.gameState.state === 3) {
+            this.onDeposit = true
+            this.sendMessage('game/startDepositReply', {ok: true, data: {}})
+          }
         }
 
         callback()
@@ -343,7 +384,7 @@ class PlayerState implements Serializable {
       this.timeoutTask = setTimeout(() => {
         callback()
         this.timeoutTask = null
-      }, isRobot ? random(500, 1500) : 1000)
+      }, isRobot ? random(2000, 2200) : 2000)
     }
   }
 
@@ -355,10 +396,19 @@ class PlayerState implements Serializable {
   }
 
   cancelDeposit() {
+    if (this.room.gameState.currentPlayerStep === -1) {
+      return;
+    }
+
     this.onDeposit = false;
     const cards = this.cards
     this.clearDepositTask();
-    this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}})
+    this.sendMessage('game/cancelDepositReply', {ok: true, data: {cards}});
+
+    console.warn("current-%s, seatIndex-%s", this.room.gameState.status.current.seatIndex, this.index);
+    if (this.room.gameState.status.current.seatIndex === this.index) {
+      this.emitter.emit('waitForDa');
+    }
   }
 
   // // 是否存在该卡

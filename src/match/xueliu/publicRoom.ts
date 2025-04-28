@@ -7,6 +7,7 @@ import {getPlayerRmqProxy} from "../PlayerRmqProxy";
 import {autoSerializePropertyKeys} from "../serializeDecorator";
 import Room from "./room";
 import TableState from "./table_state";
+import {stateGameOver} from "../xmmajiang/table_state";
 
 // 金豆房
 export class PublicRoom extends Room {
@@ -57,20 +58,16 @@ export class PublicRoom extends Room {
   }
 
   leave(player) {
-    // console.warn("publicRoom", this._id)
-    if (!player) {
-      // 玩家不存在
-      return false;
-    }
     if (this.indexOf(player) < 0) {
       return true
     }
     player.removeListener('disconnect', this.disconnectCallback)
     this.removePlayer(player)
-    this.removeReadyPlayer(player.model._id.toString())
+    this.removeOrder(player);
+    this.removeReadyPlayer(player.model._id)
     player.room = null
-    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player.model._id.toString(), roomId: this._id}})
-    this.clearScore(player.model._id.toString())
+    this.broadcast('room/leaveReply', {ok: true, data: {playerId: player.model._id, location: "xmmj.publicRoom"}})
+    this.clearScore(player.model._id)
 
     return true
   }
@@ -106,7 +103,7 @@ export class PublicRoom extends Room {
 
     if (findPlayer) {
       findPlayer.model = await service.playerService.getPlayerPlainModel(playerId);
-      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold}})
+      findPlayer.sendMessage('resource/update', {ok: true, data: {gold: findPlayer.model.gold, diamond: findPlayer.model.diamond, tlGold: findPlayer.model.tlGold, redPocket: findPlayer.model.redPocket}})
     }
   }
 
@@ -216,7 +213,7 @@ export class PublicRoom extends Room {
         await service.playerService.logGoldConsume(p._id, ConsumeLogType.payGameFee, -conf.roomRate,
           p.model.gold, `扣除房费`);
         // 通知客户端更新金豆
-        this.updateResource2Client(p)
+        await this.updateResource2Client(p)
       }
     }
   }
