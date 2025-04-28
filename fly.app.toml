@@ -1,0 +1,37 @@
+app = "tianle-game-server"
+primary_region = "hkg"
+
+[build]
+  builder = "heroku/buildpacks:20"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  REDIS_URL = "redis://tianle-redis.internal:6379"
+  MONGODB_URL = "mongodb://tianle-mongo.internal:27017/tianleServer"
+  RABBITMQ_URL = "amqp://user:password@tianle-rabbitmq.internal:5672"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 9597
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 9597
+    handlers = ["tls", "http"]
+
+[[statics]]
+  guest_path = "/app/dist"
+  url_prefix = "/dist"
+
+[mounts]
+  source = "app_data"
+  destination = "/data"

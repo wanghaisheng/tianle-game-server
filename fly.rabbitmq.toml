@@ -1,0 +1,20 @@
+app = "tianle-rabbitmq"
+primary_region = "hkg"
+
+[build]
+image = "rabbitmq:3.8.9-management"
+
+[env]
+RABBITMQ_DEFAULT_USER = "user"
+RABBITMQ_DEFAULT_PASS = "password"
+
+[services]
+internal_port = 5672
+protocol = "tcp"
+
+[[services.ports]]
+port = 5672
+
+[[services.ports]]
+port = 15672
+handlers = ["http"]

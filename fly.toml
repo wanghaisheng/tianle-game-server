@@ -1,0 +1,34 @@
+app = "tianle-game-server"
+primary_region = "hkg"
+
+[build]
+  builder = "heroku/buildpacks:20"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 9597
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 9597
+    handlers = ["tls", "http"]
+
+[[statics]]
+  guest_path = "/app/dist"
+  url_prefix = "/dist"
+
+[mounts]
+  source = "data"
+  destination = "/data"

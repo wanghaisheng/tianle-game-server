@@ -105,5 +105,9 @@
     "ts-node": "5.0.1",
     "tslint": "^5.8.0",
     "typescript": "3.7.4"
-  }
+  },
+  "creator": {
+    "version": "3.8.6"
+  },
+  "uuid": "a8dc7cc3-cab0-4f19-8a7c-715d35177de1"
 }

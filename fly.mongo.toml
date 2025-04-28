@@ -1,0 +1,16 @@
+app = "tianle-mongo"
+primary_region = "hkg"
+
+[build]
+image = "mongo:3.4"
+
+[mounts]
+source = "mongo_data"
+destination = "/data/db"
+
+[services]
+internal_port = 27017
+protocol = "tcp"
+
+[[services.ports]]
+port = 27017
